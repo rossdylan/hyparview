@@ -50,6 +50,7 @@ pub struct MessageStore<S = RandomState> {
 }
 
 impl MessageStore {
+    /// Create a new instance of the message store with the provided max size.
     pub fn new(max: usize) -> Self {
         return MessageStore {
             max: max,
@@ -60,6 +61,8 @@ impl MessageStore {
 }
 
 impl<S: BuildHasher> MessageStore<S> {
+    /// Create a new instance of the message store with the provided max size
+    /// and the given custom hasher.
     pub fn with_hasher(max: usize, hash_builder: S) -> Self {
         return MessageStore {
             max: max,
@@ -68,6 +71,8 @@ impl<S: BuildHasher> MessageStore<S> {
         };
     }
 
+    /// Add a message to the message store. If we have reached the limit pop
+    /// the oldest entry first before adding the new one.
     pub fn insert(&mut self, m: &super::Message) {
         if self.set.len() >= self.max {
             if let Some(e) = self.heap.pop() {
@@ -87,6 +92,7 @@ impl<S: BuildHasher> MessageStore<S> {
         self.set.insert(mid);
     }
 
+    /// Check if our message store contains the given message.
     pub fn contains(&self, m: &super::Message) -> bool {
         let mut hasher = self.set.hasher().build_hasher();
         m.hash(&mut hasher);

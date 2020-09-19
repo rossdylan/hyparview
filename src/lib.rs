@@ -7,7 +7,7 @@
 )]
 //! Gimme dat hot goss
 
-mod message_store;
+pub mod message_store;
 pub mod mock;
 
 use std::collections::HashSet;
@@ -130,8 +130,10 @@ impl Default for NetworkParameters {
 /// as well as an address used by the `Transport`
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct Node {
-    host: String,
-    port: u16,
+    /// The host this node is running on.
+    pub host: String,
+    /// The port this node is running on.
+    pub port: u16,
 }
 
 impl From<std::net::SocketAddr> for Node {
@@ -206,7 +208,7 @@ pub struct Message {
 
 impl Message {
     /// Create a new `Message` with a randomly generated ID.
-    fn new(from: Node, data: MessageData) -> Self {
+    pub fn new(from: Node, data: MessageData) -> Self {
         Self::with_id(from, data, rand::thread_rng().gen())
     }
 
@@ -735,6 +737,13 @@ mod tests {
             }
             std::thread::sleep(std::time::Duration::from_secs(1));
         }
+        // trigger our background threads to exit and wait for them to so do
+        drop(tx1);
+        drop(tx2);
+        drop(tx3);
+        jh1.join().unwrap();
+        jh2.join().unwrap();
+        jh3.join().unwrap();
     }
 
     #[test]
