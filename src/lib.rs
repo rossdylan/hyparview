@@ -7,20 +7,33 @@
 )]
 //! Gimme dat hot goss
 
-use crossbeam_channel::Receiver;
+mod message_store;
+pub mod mock;
+
+use std::collections::HashSet;
+use std::hash::Hash;
+use std::sync::Arc;
+use std::thread::{self, JoinHandle};
+
+use crossbeam_channel::{bounded, select, Receiver, Sender};
+use log::*;
+use parking_lot::Mutex;
+use rand::Rng;
 
 /// The passive scale factor is used to scale the size of the active-view in order
 /// to generate the size of the passive-view. This number is cribbed directly
 /// from the HyParView paper.
 const PASSIVE_SCALE_FACTOR: f64 = 6.0;
 
-/// The active scale factor is used to scale the active-view which overwise could
+/// The active scale factor is used to scale the active-view which overwise could;
 /// be zero in some cases.
 const ACTIVE_SCALE_FACTOR: f64 = 1.0;
 
-const ACTIVE_RANDOM_WALK_LENGTH: u64 = 6;
+const ACTIVE_RANDOM_WALK_LENGTH: u32 = 6;
 
-const PASSIVE_RANDOM_WALK_LENGTH: u64 = 3;
+const PASSIVE_RANDOM_WALK_LENGTH: u32 = 3;
+
+const MESSAGE_HISTORY: usize = 10_000;
 
 mod error {
     pub type Result<T> = std::result::Result<T, Error>;
@@ -33,6 +46,12 @@ mod error {
         UnableToConnect(super::Node),
         #[error("unable to send '{0:?}' channel closed")]
         ChannelFailure(super::Message),
+        #[error("unable to parse address")]
+        AddrParseFailed(#[from] std::io::Error),
+        #[error("message broadcast failed")]
+        BroadcastFailed,
+        #[error("bootstrap source found no nodes")]
+        NoBootstrapAddrsFound,
         #[error("unknown error in mocks")]
         Unknown,
     }
@@ -44,29 +63,35 @@ pub struct NetworkParameters {
     size: f64,
     c: f64,
     k: f64,
-    arwl: u64,
-    prwl: u64,
+    arwl: u32,
+    prwl: u32,
+    msg_history: usize,
 }
 
 impl NetworkParameters {
     /// Return the size of the active view given our network parameters
-    pub fn active_size(&self) -> u64 {
-        (self.size.log10() + self.c).ceil() as u64
+    pub fn active_size(&self) -> usize {
+        (self.size.log10() + self.c).ceil() as usize
     }
 
     /// Return the size of the passive view given our network parameters
-    pub fn passive_size(&self) -> u64 {
-        (self.k * (self.size.log10() + self.c)).ceil() as u64
+    pub fn passive_size(&self) -> usize {
+        (self.k * (self.size.log10() + self.c)).ceil() as usize
     }
 
     /// The number of hops a random walk in the active-view can take
-    pub fn active_rwl(&self) -> u64 {
+    pub fn active_rwl(&self) -> u32 {
         self.arwl
     }
 
     /// The number of a hops a random walk in the passive-view can take
-    pub fn passive_rwl(&self) -> u64 {
+    pub fn passive_rwl(&self) -> u32 {
         self.prwl
+    }
+
+    /// How many messages to track in our history to prevent routing loops
+    pub fn message_history(&self) -> usize {
+        self.msg_history
     }
 
     /// Helper function to build a NetworkParameters struct with the given size
@@ -78,6 +103,7 @@ impl NetworkParameters {
             k: PASSIVE_SCALE_FACTOR,
             arwl: ACTIVE_RANDOM_WALK_LENGTH,
             prwl: PASSIVE_RANDOM_WALK_LENGTH,
+            msg_history: MESSAGE_HISTORY,
         }
     }
 }
@@ -94,6 +120,7 @@ impl Default for NetworkParameters {
             k: PASSIVE_SCALE_FACTOR,
             arwl: ACTIVE_RANDOM_WALK_LENGTH,
             prwl: PASSIVE_RANDOM_WALK_LENGTH,
+            msg_history: MESSAGE_HISTORY,
         }
     }
 }
@@ -107,163 +134,489 @@ pub struct Node {
     port: u16,
 }
 
+impl From<std::net::SocketAddr> for Node {
+    fn from(addr: std::net::SocketAddr) -> Self {
+        Node {
+            host: addr.ip().to_string(),
+            port: addr.port(),
+        }
+    }
+}
+/// Used to configure the priority of a Neighbor message.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum NeighborPriority {
+    /// High priority Neighbor messages come from nodes that have no members in
+    /// the active view.
+    High,
+
+    /// Low priority Neighbor messages come from nodes that have members in the
+    /// active view.
+    Low,
+}
+
 /// Possible messages that can be sent or received from other nodes in the
 /// network.
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
-pub enum Message {
+pub enum MessageData {
     /// Join a node to the network
-    Join {
-        /// The node issuing this join command
-        node: Node,
-    },
+    Join,
     /// Forward a join message to other nodes in the network
     ForwardJoin {
         /// The node that originally issued a Join
         node: Node,
 
-        /// The node forwarding this Join
-        sender: Node,
-
         /// The TTL (how many hops) this join should make
         ttl: u32,
     },
     /// Trigger a clean disconnect to the given node
-    Disconnect {
-        /// The node that issued this Disconnect
-        node: Node,
+    Disconnect,
+    /// Neighbor messages are used to promote a passive-view node into the active
+    /// view
+    Neighbor {
+        /// The priority of this request
+        priority: NeighborPriority,
+    },
+    /// Shuffle is used to periodically shufflerefresh
+    Shuffle {
+        /// The TTL (how many hops) this shuffle should make
+        ttl: u32,
+
+        /// A set of nodes from the originating node's passive view
+        nodes: Vec<Node>,
+    },
+    /// The response to a Shuffle message.
+    ShuffleReply {
+        /// A set of nodes from the final destination of the Shuffle message
+        nodes: Vec<Node>,
     },
     /// Data is not used for membership operations, but for sending user data
     Data(Vec<u8>),
 }
 
+/// Envelope for our message. Adds a unique ID to ensure messages hash to a
+/// unique value.
+/// TODO(rossdylan): Think about adding concept of headers/baggage here to piggy
+/// back non-protocol messages (healthchecks/etc) onto standard messages
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct Message {
+    id: u64,
+    from: Node,
+    data: MessageData,
+}
+
+impl Message {
+    /// Create a new `Message` with a randomly generated ID.
+    fn new(from: Node, data: MessageData) -> Self {
+        Self::with_id(from, data, rand::thread_rng().gen())
+    }
+
+    // Create a new `Message` with the given ID
+    fn with_id(from: Node, data: MessageData, id: u64) -> Self {
+        Message {
+            id: id,
+            from: from,
+            data: data,
+        }
+    }
+}
+
+/// The Failure enum is used to inform the HyParView protocol handles of node
+/// failures from the Transport layer. The protocol is designed around async
+/// messaging so we use channels to move data in and out of the transport layer
+#[derive(Debug, Clone)]
+pub enum Failure {
+    /// The transport failed to send a message to the given node
+    FailedToSend(Node),
+}
+
 /// Transport is used to describe the operations needed to drive the
 /// communications the HyParView protocol uses. All serialization and transport
 /// logic is abstracted away behind this trait.
-trait Transport: Send + Sync {
-    /// Send a Message to the provided Node
-    fn send(&self, dest: &Node, msg: &Message) -> error::Result<()>;
+pub trait Transport: Clone + Send + Sync {
+    /// Used to do the initial health check of a node, and open a tcp connection
+    /// to it. This is synchronous, but actually sending messages is async.
+    fn connect(&self, node: &Node) -> error::Result<()>;
 
-    /// Return a clone of rx side of the channel we put incoming messages into
+    /// Send a Message to the provided Node. This *must not* block
+    fn send(&self, dest: &Node, msg: &Message);
+
+    /// Return the rx side of a channel for handling messages from other nodes
     fn incoming(&self) -> Receiver<Message>;
+
+    /// Return the rx side of a channel for handling communication failures
+    fn failures(&self) -> Receiver<Failure>;
 }
 
-trait NewTransport {
-    type Transport: Transport;
-
-    fn new() -> error::Result<Self::Transport>;
-}
-
-/// MessageStore is used during normal gossip operation to keep track of the
-/// data messages we've already seen. This avoids endless loops.
-trait MessageStore: Send + Sync {
-    fn add(&self, msg: Message);
-    fn exists(&self, msg: Message) -> bool;
-    fn size(&self) -> u64;
-}
-
-// BoostrapSource is used to generate the initial node to try and join to.
-// If we run out of bootstrap nodes an error should be returned
-trait BootstrapSource {
+/// BoostrapSource is used to generate the initial node to try and join to.
+/// If we run out of bootstrap nodes an error should be returned
+pub trait BootstrapSource {
     /// Retreive the next possible bootstrap node data from a BootstrapSource
-    fn next() -> error::Result<Option<Node>>;
+    fn next_node(&mut self) -> error::Result<Option<Node>>;
+
+    /// subset returns a set of nodes up to the given subset size. It will
+    /// tolerate up to `max_failures` before returning
+    /// TODO(rossdylan): This is ugly and strongly imperative, try and fix
+    fn subset(&mut self, max_subset: usize, max_failures: usize) -> error::Result<Vec<Node>> {
+        let mut failures: usize = 0;
+        let mut nodes = Vec::with_capacity(max_subset);
+        while nodes.len() < max_subset {
+            match self.next_node() {
+                Err(e) => {
+                    failures += 1;
+                    if failures >= max_failures && nodes.len() == 0 {
+                        return Err(e);
+                    } else {
+                        return Ok(nodes);
+                    }
+                }
+                Ok(on) => {
+                    if let Some(n) = on {
+                        nodes.push(n)
+                    } else {
+                        if nodes.len() > 0 {
+                            return Ok(nodes);
+                        }
+                        return Err(error::Error::NoBootstrapAddrsFound);
+                    }
+                }
+            }
+        }
+        Ok(nodes)
+    }
 }
 
-struct HyParView<T: Transport> {
+/// Implement `BoostrapSource` for all iterators that iterate over something that
+/// can be converted into a `SocketAddr`. This lets us easily bootstrap using a
+/// vector of strings.
+impl<I, S> BootstrapSource for I
+where
+    I: Iterator<Item = S>,
+    S: std::net::ToSocketAddrs,
+{
+    fn next_node(&mut self) -> error::Result<Option<Node>> {
+        let res = match self.next() {
+            None => None,
+            Some(s) => {
+                let mut addrs = s.to_socket_addrs()?;
+                addrs.next().map(std::convert::From::from)
+            }
+        };
+        Ok(res)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct State {
     me: Node,
+    params: NetworkParameters,
+    active_view: HashSet<Node>,
+    passive_view: HashSet<Node>,
+    // TODO(rossdylan): We might be able to get away with something like a bloom
+    // filter here to increase space efficiency.
+    messages: message_store::MessageStore,
+}
+
+fn random_node_from_view(view: &HashSet<Node>) -> Option<Node> {
+    view.iter().cloned().next()
+}
+
+impl State {
+    /// Given a node that represents this instance, and the parameters for our
+    /// network create a new state.
+    pub fn new(me: Node, params: NetworkParameters) -> Self {
+        let asize = params.active_size() as usize;
+        let psize = params.passive_size() as usize;
+        State {
+            me: me,
+            params: params,
+            active_view: HashSet::with_capacity(asize),
+            passive_view: HashSet::with_capacity(psize),
+            messages: message_store::MessageStore::new(params.message_history()),
+        }
+    }
+
+    pub fn random_active_node(&self) -> Option<Node> {
+        random_node_from_view(&self.active_view)
+    }
+
+    pub fn random_passive_node(&self) -> Option<Node> {
+        random_node_from_view(&self.passive_view)
+    }
+
+    pub fn add_to_active_view(&mut self, node: &Node) -> Option<Node> {
+        if self.active_view.contains(node) || *node == self.me {
+            return None;
+        }
+        let dropped = if self.active_view.len() == self.params.active_size() {
+            random_node_from_view(&self.active_view)
+        } else {
+            None
+        };
+        if let Some(ref dn) = dropped {
+            self.active_view.remove(dn);
+            self.add_to_passive_view(dn);
+        }
+        self.active_view.insert(node.clone());
+        dropped
+    }
+
+    pub fn add_to_passive_view(&mut self, node: &Node) {
+        if self.passive_view.contains(node) || self.active_view.contains(node) || self.me == *node {
+            return;
+        }
+        if self.passive_view.len() == self.params.active_size() {
+            let to_drop = random_node_from_view(&self.passive_view).unwrap();
+            self.passive_view.remove(&to_drop);
+        }
+        self.passive_view.insert(node.clone());
+    }
+
+    pub fn add_message(&mut self, msg: &Message) {
+        self.messages.insert(msg);
+    }
+
+    pub fn seen_message(&self, msg: &Message) -> bool {
+        self.messages.contains(msg)
+    }
+}
+
+/// Implements the HyParView protocol over a generic transport layer. Messages
+/// from the transport layer are recieved over a channel. The protocol is driven
+/// by 3 threads.
+/// 1. Messages from other nodes are received through the transport's channel and
+///    handled in a single thread.
+/// 2. Reactive changes to the active-view are handled via a 2nd thread that
+///    receives failure notifications over another channel.
+/// 3. Periodic passive-view shuffles are executed on a timer in a 3rd thread
+#[derive(Clone, Debug)]
+pub struct HyParView<T: Transport + 'static> {
+    me: Node,
+    params: NetworkParameters,
     transport: T,
+    state: Arc<Mutex<State>>,
 }
 
 impl<T: Transport> HyParView<T> {
-    fn new<NT: NewTransport<Transport = T>>(host: &str, port: u16) -> error::Result<HyParView<T>> {
-        let transport = NT::new()?;
-        let hpv = HyParView {
-            me: Node {
-                host: String::from(host),
-                port: port,
-            },
-            transport: transport,
+    /// Create a new HyParView instance with the provided transport
+    pub fn with_transport(
+        host: &str,
+        port: u16,
+        params: NetworkParameters,
+        transport: T,
+    ) -> HyParView<T> {
+        let me = Node {
+            host: String::from(host),
+            port: port,
         };
-        Ok(hpv)
-    }
-
-    fn with_transport(host: &str, port: u16, transport: T) -> HyParView<T> {
         HyParView {
-            me: Node {
-                host: String::from(host),
-                port: port,
-            },
+            me: me.clone(),
+            params: params.clone(),
             transport: transport,
-        }
-    }
-}
-
-mod mock_transport {
-    use std::collections::HashMap;
-    use std::sync::Arc;
-
-    use crossbeam_channel::{unbounded, Receiver, SendError, Sender};
-    use parking_lot::Mutex;
-
-    #[derive(Clone, Debug)]
-    pub struct MockConnections {
-        connections:
-            Arc<Mutex<HashMap<super::Node, (Sender<super::Message>, Receiver<super::Message>)>>>,
-    }
-
-    pub struct MockTransport {
-        conns: MockConnections,
-        tx: Sender<super::Message>,
-        rx: Receiver<super::Message>,
-    }
-
-    impl super::Transport for MockTransport {
-        /// Send a Message to the provided Node
-        fn send(&self, dest: &super::Node, msg: &super::Message) -> crate::error::Result<()> {
-            self.conns.send_to(dest, msg)
-        }
-
-        /// Return a clone of rx side of the channel we put incoming messages into
-        fn incoming(&self) -> Receiver<super::Message> {
-            return self.rx.clone();
+            state: Arc::new(Mutex::new(State::new(me, params))),
         }
     }
 
-    impl MockConnections {
-        pub fn new() -> Self {
-            MockConnections {
-                connections: Arc::new(Mutex::new(HashMap::new())),
-            }
-        }
-
-        fn send_to(&self, dest: &super::Node, msg: &super::Message) -> crate::error::Result<()> {
-            let conns = self.connections.lock();
-            if let Some((tx, _)) = conns.get(&dest) {
-                tx.send(msg.clone())
-                    .map_err(|e| crate::error::Error::ChannelFailure(e.into_inner()))
+    /// Trigger the initialization of this HyParView instance by trying to find
+    /// a bootstrap node and sending it a join.
+    pub fn init(&self, boots: &mut impl BootstrapSource) -> error::Result<()> {
+        loop {
+            if let Some(contact_node) = boots.next_node()? {
+                match self.transport.connect(&contact_node) {
+                    Ok(_) => {
+                        self.state.lock().add_to_active_view(&contact_node);
+                        self.transport.send(
+                            &contact_node,
+                            &Message::new(self.me.clone(), MessageData::Join),
+                        );
+                        return Ok(());
+                    }
+                    Err(e) => warn!(
+                        "failed to contact bootstrap node: {:?}: {}",
+                        contact_node, e
+                    ),
+                };
             } else {
-                return Err(crate::error::Error::UnableToConnect(dest.clone()));
+                return Err(error::Error::NoBootstrapAddrsFound);
             }
         }
+    }
 
-        pub fn new_transport(&self, node: &super::Node) -> MockTransport {
-            let (tx, rx) = unbounded();
-            let mut conns = self.connections.lock();
-            conns.insert(node.clone(), (tx.clone(), rx.clone()));
-            MockTransport {
-                conns: self.clone(),
-                tx,
-                rx,
+    /// Send a message to all nodes in the active-view. If all nodes in the
+    /// active-view have failed we return an Err to notify the caller that this
+    /// message wasn't sent to anyone.
+    fn broadcast(&self, ignore: &Node, msg: &Message) {
+        let nodes = self.state.lock().active_view.clone();
+        for node in nodes.iter() {
+            if node == ignore {
+                continue;
+            }
+            self.transport.send(node, msg);
+        }
+    }
+
+    fn send_disconnect(&self, node: &Node) {
+        self.transport.send(
+            node,
+            &Message::new(self.me.clone(), MessageData::Disconnect),
+        );
+    }
+
+    fn handle_join(&self, from: &Node) {
+        // Treat this as a warning in case its transient, if it isn't the
+        // failure detection will clean it up properly soon
+        if let Err(e) = self.transport.connect(from) {
+            warn!("failed to connect to {:?} who sent us a JOIN: {}", from, e);
+        }
+        self.state
+            .lock()
+            .add_to_active_view(from)
+            .map(|n| self.send_disconnect(&n));
+        let fwd_message = Message::new(
+            self.me.clone(),
+            MessageData::ForwardJoin {
+                node: from.clone(),
+                ttl: self.params.active_rwl(),
+            },
+        );
+        self.broadcast(from, &fwd_message);
+    }
+
+    fn handle_neighbor(&self, from: &Node, prio: NeighborPriority) {
+        match prio {
+            NeighborPriority::High => {
+                self.state
+                    .lock()
+                    .add_to_active_view(from)
+                    .map(|n| self.send_disconnect(&n));
+            }
+            NeighborPriority::Low => {
+                let mut state = self.state.lock();
+                if state.active_view.len() < self.params.active_size() {
+                    // We explicitly make sure we have room so there will be no
+                    // node to disconnect.
+                    state.add_to_active_view(from);
+                }
             }
         }
+    }
+
+    fn handle_disconnect(&self, from: &Node) {
+        let mut state = self.state.lock();
+        let to_drop = state.active_view.take(from);
+        to_drop.map(|n| state.add_to_passive_view(&n));
+    }
+
+    fn handle_forward_join(&self, from: &Node, node: &Node, ttl: u32) {
+        let mut state = self.state.lock();
+        // NOTE(rossdylan): the len(active-view) clause has two different values
+        // in the paper. The formalism has == 0, and the textual has == 1. The
+        // correct one is == 1, since without at least one node in our
+        // active-view we wouldn't get getting any messages.
+        if state.active_view.len() == 1 || ttl == 0 {
+            if let Ok(_) = self.transport.connect(node) {
+                // NOTE(rossdylan): Another error in the paper is the lack of
+                // a `Send(NEIGHBOR, n, LowPriority)` which is needed to maintain
+                // the symetry of active-views. I dove into the source of partisan
+                // which contains the OG implementation and confirmed that it
+                // sends a NEIGHBOR request on the end of FORWARD_JOIN random walk
+                self.send_neighbor(node, NeighborPriority::Low);
+                state
+                    .add_to_active_view(node)
+                    .map(|n| self.send_disconnect(&n));
+            } else {
+                error!(
+                    "failed to connect to {:?} during ForwardJoin, ignoring",
+                    node
+                )
+            }
+        } else {
+            if ttl == self.params.passive_rwl() {
+                state.add_to_passive_view(node)
+            }
+            let random_n = state.active_view.iter().filter(|n| *n != from).next();
+            if let Some(n) = random_n {
+                self.transport.send(
+                    n,
+                    &Message::new(
+                        self.me.clone(),
+                        MessageData::ForwardJoin {
+                            node: node.clone(),
+                            ttl: ttl - 1,
+                        },
+                    ),
+                );
+            }
+        }
+    }
+
+    fn send_neighbor(&self, dest: &Node, prio: NeighborPriority) {
+        self.transport.send(
+            dest,
+            &Message::new(self.me.clone(), MessageData::Neighbor { priority: prio }),
+        )
+    }
+
+    fn handle_message(&self, msg: &Message) {
+        // explict scoping to force a drop of the mutex guard. The individual
+        // helper functions all acquire the mutex on their own.
+        {
+            let mut state = self.state.lock();
+            if state.seen_message(msg) {
+                return;
+            }
+            trace!("[{:?}] received message: {:?}", &self.me, msg);
+            state.add_message(msg);
+        }
+        match msg.data {
+            MessageData::Data(ref data) => {
+                info!("received user broadcast message of length {}", data.len());
+            }
+            MessageData::Join => self.handle_join(&msg.from),
+            MessageData::Disconnect => self.handle_disconnect(&msg.from),
+            MessageData::ForwardJoin { ref node, ttl } => {
+                self.handle_forward_join(&msg.from, node, ttl)
+            }
+            MessageData::Neighbor { priority } => self.handle_neighbor(&msg.from, priority),
+            _ => {}
+        }
+    }
+
+    /// The message_thread processing incoming messages from other members in
+    /// our network.
+    fn message_thread(&self, shutdown: Receiver<()>) {
+        let incoming_messages = self.transport.incoming();
+        loop {
+            select! {
+                recv(incoming_messages) -> msg => match msg {
+                    Ok(m) => self.handle_message(&m),
+                    Err(e) => panic!("failed to fail wait for incoming messages {}", e),
+                },
+                recv(shutdown) -> _ => {
+                    info!("shutting down message thread");
+                    return
+                },
+            }
+        }
+    }
+
+    /// Start the background threads that drive the HyParView protocol
+    pub fn start(&self) -> (Sender<()>, JoinHandle<()>) {
+        let (tx, rx) = bounded(1);
+        let self_ref = self.clone();
+        let handle = thread::spawn(move || {
+            self_ref.clone().message_thread(rx);
+        });
+        (tx, handle)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mock::*;
     #[test]
     fn test_creation() {
-        let conns = mock_transport::MockConnections::new();
+        let conns = MockConnections::new();
         let t1 = conns.new_transport(&Node {
             host: "localhost".into(),
             port: 4200,
@@ -273,8 +626,115 @@ mod tests {
             port: 6900,
         });
 
-        let h1 = HyParView::with_transport("localhost", 4200, t1);
-        let h2 = HyParView::with_transport("localhost", 6900, t2);
+        let _h1 = HyParView::with_transport("localhost", 4200, Default::default(), t1);
+        let _h2 = HyParView::with_transport("localhost", 6900, Default::default(), t2);
+    }
+
+    #[test]
+    fn test_mock_transport() {
+        let conns = MockConnections::new();
+        let node1 = Node {
+            host: "localhost".into(),
+            port: 4200,
+        };
+        let node2 = Node {
+            host: "localhost".into(),
+            port: 6900,
+        };
+        let t1 = conns.new_transport(&node1);
+        let t2 = conns.new_transport(&node2);
+
+        t1.send(&node2, &Message::new(node1.clone(), MessageData::Join));
+        assert!(t1.failures().is_empty());
+        assert_eq!(t2.incoming().len(), 1);
+        let rx_res = t2.incoming().try_recv();
+        assert!(rx_res.is_ok());
+        let msg = rx_res.unwrap();
+        assert_eq!(msg.from, node1);
+        assert_eq!(msg.data, MessageData::Join);
+    }
+
+    #[test]
+    fn test_join() {
+        let fres = fern::Dispatch::default()
+            .level(log::LevelFilter::Trace)
+            .format(|out, message, record| {
+                out.finish(format_args!(
+                    "{}[{}][{}] {}",
+                    chrono::Local::now().format("[%Y-%m-%d][%H:%M:%S]"),
+                    record.target(),
+                    record.level(),
+                    message
+                ))
+            })
+            .chain(std::io::stderr())
+            .apply();
+        let conns = MockConnections::new();
+        let node1 = Node {
+            host: "localhost".into(),
+            port: 4200,
+        };
+        let node2 = Node {
+            host: "localhost".into(),
+            port: 6900,
+        };
+        let t1 = conns.new_transport(&node1);
+        let t2 = conns.new_transport(&node2);
+
+        let h1 = HyParView::with_transport("localhost", 4200, Default::default(), t1);
+        let h2 = HyParView::with_transport("localhost", 6900, Default::default(), t2);
+
+        h1.transport
+            .send(&node2, &Message::new(node1.clone(), MessageData::Join));
+        assert!(h1.transport.failures().is_empty());
+        assert_eq!(h2.transport.incoming().len(), 1);
+        let rx_res = h2.transport.incoming().try_recv();
+        assert!(rx_res.is_ok());
+        let msg = rx_res.unwrap();
+        h2.handle_message(&msg);
+
+        assert!(h2.state.lock().active_view.contains(&node1))
+    }
+
+    #[test]
+    fn test_forward_join() {
+        let conns = MockConnections::new();
+        let node1 = Node {
+            host: "::1".into(),
+            port: 4200,
+        };
+        let node2 = Node {
+            host: "::1".into(),
+            port: 6900,
+        };
+        let node3 = Node {
+            host: "::1".into(),
+            port: 7000,
+        };
+        let t1 = conns.new_transport(&node1);
+        let t2 = conns.new_transport(&node2);
+        let t3 = conns.new_transport(&node3);
+
+        let h1 = HyParView::with_transport("::1", 4200, Default::default(), t1);
+        let h2 = HyParView::with_transport("::1", 6900, Default::default(), t2);
+        let h3 = HyParView::with_transport("::1", 7000, Default::default(), t3);
+
+        let (tx1, jh1) = h1.start();
+        let (tx2, jh2) = h2.start();
+        let (tx3, jh3) = h3.start();
+
+        assert!(h1.init(&mut ["::1:6900"].iter()).is_ok());
+        assert!(h3.init(&mut ["::1:6900"].iter()).is_ok());
+        // Wait 5 seconds for network to converge
+        for _ in 0..5 {
+            if h1.state.lock().active_view.len() == 2
+                && h2.state.lock().active_view.len() == 2
+                && h3.state.lock().active_view.len() == 2
+            {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
     }
 
     #[test]
@@ -282,5 +742,16 @@ mod tests {
         let params = NetworkParameters::default();
         assert_eq!(params.active_size(), 5);
         assert_eq!(params.passive_size(), 30);
+    }
+
+    #[test]
+    fn test_iter_bootstrap() {
+        let addrs = ["localhost:4445"];
+        let subset_res = addrs.iter().subset(1, 0);
+        assert!(subset_res.is_ok());
+        let subset = subset_res.unwrap();
+        assert_eq!(subset.len(), 1);
+        assert!(subset[0].host == "127.0.0.1" || subset[0].host == "::1");
+        assert_eq!(subset[0].port, 4445);
     }
 }
