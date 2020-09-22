@@ -10,15 +10,15 @@
 pub mod message_store;
 pub mod mock;
 
-use std::collections::HashSet;
 use std::hash::Hash;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
 use crossbeam_channel::{bounded, select, Receiver, Sender};
+use indexmap::IndexSet;
 use log::*;
 use parking_lot::Mutex;
-use rand::Rng;
+use rand::{seq::IteratorRandom, Rng};
 
 /// The passive scale factor is used to scale the size of the active-view in order
 /// to generate the size of the passive-view. This number is cribbed directly
@@ -34,6 +34,10 @@ const ACTIVE_RANDOM_WALK_LENGTH: u32 = 6;
 const PASSIVE_RANDOM_WALK_LENGTH: u32 = 3;
 
 const MESSAGE_HISTORY: usize = 10_000;
+
+const SHUFFLE_ACTIVE: usize = 3;
+
+const SHUFFLE_PASSIVE: usize = 4;
 
 mod error {
     pub type Result<T> = std::result::Result<T, Error>;
@@ -60,12 +64,29 @@ mod error {
 /// Constants used to derive active and passive view sizes
 #[derive(Clone, Copy, Debug)]
 pub struct NetworkParameters {
+    /// network size
     size: f64,
+
+    /// active-view scaling factor
     c: f64,
+
+    /// passive-view scaling factor
     k: f64,
+
+    /// active random walk ttl
     arwl: u32,
+
+    /// passive random walk ttl
     prwl: u32,
+
+    /// number of messages to track to avoid routing loops
     msg_history: usize,
+
+    /// number of nodes from the passive-view included in a shuffle
+    kp: usize,
+
+    /// number of nodes from the active-view included in a shuffle
+    ka: usize,
 }
 
 impl NetworkParameters {
@@ -104,6 +125,8 @@ impl NetworkParameters {
             arwl: ACTIVE_RANDOM_WALK_LENGTH,
             prwl: PASSIVE_RANDOM_WALK_LENGTH,
             msg_history: MESSAGE_HISTORY,
+            kp: SHUFFLE_PASSIVE,
+            ka: SHUFFLE_ACTIVE,
         }
     }
 }
@@ -115,12 +138,14 @@ impl Default for NetworkParameters {
     /// pull real params from
     fn default() -> Self {
         NetworkParameters {
-            size: 10000.0,
+            size: 10_000.0,
             c: ACTIVE_SCALE_FACTOR,
             k: PASSIVE_SCALE_FACTOR,
             arwl: ACTIVE_RANDOM_WALK_LENGTH,
             prwl: PASSIVE_RANDOM_WALK_LENGTH,
             msg_history: MESSAGE_HISTORY,
+            kp: SHUFFLE_PASSIVE,
+            ka: SHUFFLE_ACTIVE,
         }
     }
 }
@@ -311,15 +336,16 @@ where
 struct State {
     me: Node,
     params: NetworkParameters,
-    active_view: HashSet<Node>,
-    passive_view: HashSet<Node>,
+    active_view: IndexSet<Node>,
+    passive_view: IndexSet<Node>,
     // TODO(rossdylan): We might be able to get away with something like a bloom
     // filter here to increase space efficiency.
     messages: message_store::MessageStore,
 }
 
-fn random_node_from_view(view: &HashSet<Node>) -> Option<Node> {
-    view.iter().cloned().next()
+fn random_node_from_view(view: &IndexSet<Node>) -> Option<Node> {
+    let index = rand::thread_rng().gen_range(0, view.len());
+    view.get_index(index).map(Clone::clone)
 }
 
 impl State {
@@ -331,18 +357,34 @@ impl State {
         State {
             me: me,
             params: params,
-            active_view: HashSet::with_capacity(asize),
-            passive_view: HashSet::with_capacity(psize),
+            active_view: IndexSet::with_capacity(asize),
+            passive_view: IndexSet::with_capacity(psize),
             messages: message_store::MessageStore::new(params.message_history()),
         }
     }
 
-    pub fn random_active_node(&self) -> Option<Node> {
-        random_node_from_view(&self.active_view)
-    }
-
-    pub fn random_passive_node(&self) -> Option<Node> {
-        random_node_from_view(&self.passive_view)
+    /// Select Kp nodes from the passive-view and Ka nodes from the active-view
+    /// to service a shuffle request
+    pub fn select_shuffle_nodes(&self, ignore: &Node) -> Vec<Node> {
+        let len = self.active_view.len();
+        let mut nodes = Vec::with_capacity(self.params.ka + self.params.kp);
+        nodes.extend(
+            std::iter::repeat_with(|| rand::thread_rng().gen_range(0, len))
+                .take(len) // Do we need this? I want to make sure we don't iter forever
+                .filter_map(|i| self.active_view.get_index(i))
+                .filter(|n| *n != ignore)
+                .take(self.params.ka)
+                .cloned(),
+        );
+        nodes.extend(
+            std::iter::repeat_with(|| rand::thread_rng().gen_range(0, len))
+                .take(len) // Do we need this? I want to make sure we don't iter forever
+                .filter_map(|i| self.passive_view.get_index(i))
+                .filter(|n| *n != ignore)
+                .take(self.params.ka)
+                .cloned(),
+        );
+        nodes
     }
 
     pub fn add_to_active_view(&mut self, node: &Node) -> Option<Node> {
@@ -535,7 +577,11 @@ impl<T: Transport> HyParView<T> {
             if ttl == self.params.passive_rwl() {
                 state.add_to_passive_view(node)
             }
-            let random_n = state.active_view.iter().filter(|n| *n != from).next();
+            let random_n = state
+                .active_view
+                .iter()
+                .filter(|n| *n != from)
+                .choose(&mut rand::thread_rng());
             if let Some(n) = random_n {
                 self.transport.send(
                     n,
@@ -601,14 +647,37 @@ impl<T: Transport> HyParView<T> {
         }
     }
 
+    fn handle_failure(&self, f: &Failure) {}
+
+    fn failure_thread(&self, shutdown: Receiver<()>) {
+        let failures = self.transport.failures();
+        loop {
+            select! {
+                recv(failures) -> msg => match msg {
+                    Ok(f) => self.handle_failure(&f),
+                    Err(e) => panic!("failed to fail wait for incoming messages {}", e),
+                },
+                recv(shutdown) -> _ => {
+                    info!("shutting down failure thread");
+                    return
+                },
+            }
+        }
+    }
+
     /// Start the background threads that drive the HyParView protocol
-    pub fn start(&self) -> (Sender<()>, JoinHandle<()>) {
+    pub fn start(&self) -> (Sender<()>, Vec<JoinHandle<()>>) {
+        let mut handles = Vec::with_capacity(3);
         let (tx, rx) = bounded(1);
         let self_ref = self.clone();
-        let handle = thread::spawn(move || {
-            self_ref.clone().message_thread(rx);
-        });
-        (tx, handle)
+        let mrx = rx.clone();
+        handles.push(thread::spawn(move || {
+            self_ref.message_thread(mrx);
+        }));
+        let self_ref = self.clone();
+        let frx = rx.clone();
+        handles.push(thread::spawn(move || self_ref.failure_thread(frx)));
+        (tx, handles)
     }
 }
 
@@ -721,9 +790,17 @@ mod tests {
         let h2 = HyParView::with_transport("::1", 6900, Default::default(), t2);
         let h3 = HyParView::with_transport("::1", 7000, Default::default(), t3);
 
-        let (tx1, jh1) = h1.start();
-        let (tx2, jh2) = h2.start();
-        let (tx3, jh3) = h3.start();
+        let mut chans = Vec::new();
+        let mut handles = Vec::new();
+        let (tx1, mut jh1) = h1.start();
+        chans.push(tx1);
+        handles.append(&mut jh1);
+        let (tx2, mut jh2) = h2.start();
+        chans.push(tx2);
+        handles.append(&mut jh2);
+        let (tx3, mut jh3) = h3.start();
+        chans.push(tx3);
+        handles.append(&mut jh3);
 
         assert!(h1.init(&mut ["::1:6900"].iter()).is_ok());
         assert!(h3.init(&mut ["::1:6900"].iter()).is_ok());
@@ -738,12 +815,12 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_secs(1));
         }
         // trigger our background threads to exit and wait for them to so do
-        drop(tx1);
-        drop(tx2);
-        drop(tx3);
-        jh1.join().unwrap();
-        jh2.join().unwrap();
-        jh3.join().unwrap();
+        for c in chans.into_iter() {
+            drop(c);
+        }
+        for jh in handles.into_iter() {
+            jh.join().unwrap();
+        }
     }
 
     #[test]
