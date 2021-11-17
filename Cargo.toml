@@ -2,7 +2,7 @@
 name = "hyparview"
 version = "0.1.0"
 authors = ["Ross Delinger <rossdylan@fastmail.com>"]
-edition = "2018"
+edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -11,10 +11,10 @@ anyhow = "1.0"
 chrono = "0.4"
 crossbeam-channel = "0.4"
 fern = "0.6"
-indexmap = "1.6.0"
+indexmap = "1.7"
 log = "0.4"
 parking_lot = "0.11"
-rand = "0.7"
+rand = "0.8"
 thiserror = "1.0"
 
 [dev-dependencies]

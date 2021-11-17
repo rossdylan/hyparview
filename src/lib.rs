@@ -119,7 +119,7 @@ impl NetworkParameters {
     /// but keeping the default scaling factors.
     pub fn default_with_size(size: f64) -> Self {
         NetworkParameters {
-            size: size,
+            size,
             c: ACTIVE_SCALE_FACTOR,
             k: PASSIVE_SCALE_FACTOR,
             arwl: ACTIVE_RANDOM_WALK_LENGTH,
@@ -240,9 +240,9 @@ impl Message {
     // Create a new `Message` with the given ID
     fn with_id(from: Node, data: MessageData, id: u64) -> Self {
         Message {
-            id: id,
-            from: from,
-            data: data,
+            id,
+            from,
+            data,
         }
     }
 }
@@ -290,7 +290,7 @@ pub trait BootstrapSource {
             match self.next_node() {
                 Err(e) => {
                     failures += 1;
-                    if failures >= max_failures && nodes.len() == 0 {
+                    if failures >= max_failures && nodes.is_empty() {
                         return Err(e);
                     } else {
                         return Ok(nodes);
@@ -300,7 +300,7 @@ pub trait BootstrapSource {
                     if let Some(n) = on {
                         nodes.push(n)
                     } else {
-                        if nodes.len() > 0 {
+                        if !nodes.is_empty() {
                             return Ok(nodes);
                         }
                         return Err(error::Error::NoBootstrapAddrsFound);
@@ -344,7 +344,7 @@ struct State {
 }
 
 fn random_node_from_view(view: &IndexSet<Node>) -> Option<Node> {
-    let index = rand::thread_rng().gen_range(0, view.len());
+    let index = rand::thread_rng().gen_range(0..view.len());
     view.get_index(index).map(Clone::clone)
 }
 
@@ -355,8 +355,8 @@ impl State {
         let asize = params.active_size() as usize;
         let psize = params.passive_size() as usize;
         State {
-            me: me,
-            params: params,
+            me,
+            params,
             active_view: IndexSet::with_capacity(asize),
             passive_view: IndexSet::with_capacity(psize),
             messages: message_store::MessageStore::new(params.message_history()),
@@ -369,7 +369,7 @@ impl State {
         let len = self.active_view.len();
         let mut nodes = Vec::with_capacity(self.params.ka + self.params.kp);
         nodes.extend(
-            std::iter::repeat_with(|| rand::thread_rng().gen_range(0, len))
+            std::iter::repeat_with(|| rand::thread_rng().gen_range(0..len))
                 .take(len) // Do we need this? I want to make sure we don't iter forever
                 .filter_map(|i| self.active_view.get_index(i))
                 .filter(|n| *n != ignore)
@@ -377,7 +377,7 @@ impl State {
                 .cloned(),
         );
         nodes.extend(
-            std::iter::repeat_with(|| rand::thread_rng().gen_range(0, len))
+            std::iter::repeat_with(|| rand::thread_rng().gen_range(0..len))
                 .take(len) // Do we need this? I want to make sure we don't iter forever
                 .filter_map(|i| self.passive_view.get_index(i))
                 .filter(|n| *n != ignore)
@@ -450,12 +450,12 @@ impl<T: Transport> HyParView<T> {
     ) -> HyParView<T> {
         let me = Node {
             host: String::from(host),
-            port: port,
+            port,
         };
         HyParView {
             me: me.clone(),
-            params: params.clone(),
-            transport: transport,
+            params,
+            transport,
             state: Arc::new(Mutex::new(State::new(me, params))),
         }
     }
@@ -511,10 +511,9 @@ impl<T: Transport> HyParView<T> {
         if let Err(e) = self.transport.connect(from) {
             warn!("failed to connect to {:?} who sent us a JOIN: {}", from, e);
         }
-        self.state
-            .lock()
-            .add_to_active_view(from)
-            .map(|n| self.send_disconnect(&n));
+        if let Some(n) = self.state.lock().add_to_active_view(from) {
+            self.send_disconnect(&n);
+        }
         let fwd_message = Message::new(
             self.me.clone(),
             MessageData::ForwardJoin {
@@ -528,10 +527,9 @@ impl<T: Transport> HyParView<T> {
     fn handle_neighbor(&self, from: &Node, prio: NeighborPriority) {
         match prio {
             NeighborPriority::High => {
-                self.state
-                    .lock()
-                    .add_to_active_view(from)
-                    .map(|n| self.send_disconnect(&n));
+                if let Some(n) = self.state.lock().add_to_active_view(from) {
+                    self.send_disconnect(&n);
+                }
             }
             NeighborPriority::Low => {
                 let mut state = self.state.lock();
@@ -546,8 +544,9 @@ impl<T: Transport> HyParView<T> {
 
     fn handle_disconnect(&self, from: &Node) {
         let mut state = self.state.lock();
-        let to_drop = state.active_view.take(from);
-        to_drop.map(|n| state.add_to_passive_view(&n));
+        if let Some(n) = state.active_view.take(from) {
+            state.add_to_passive_view(&n);
+        }
     }
 
     fn handle_forward_join(&self, from: &Node, node: &Node, ttl: u32) {
@@ -557,16 +556,16 @@ impl<T: Transport> HyParView<T> {
         // correct one is == 1, since without at least one node in our
         // active-view we wouldn't get getting any messages.
         if state.active_view.len() == 1 || ttl == 0 {
-            if let Ok(_) = self.transport.connect(node) {
+            if self.transport.connect(node).is_ok() {
                 // NOTE(rossdylan): Another error in the paper is the lack of
                 // a `Send(NEIGHBOR, n, LowPriority)` which is needed to maintain
                 // the symetry of active-views. I dove into the source of partisan
-                // which contains the OG implementation and confirmed that it
+                // which contains an implementation and confirmed that it
                 // sends a NEIGHBOR request on the end of FORWARD_JOIN random walk
                 self.send_neighbor(node, NeighborPriority::Low);
-                state
-                    .add_to_active_view(node)
-                    .map(|n| self.send_disconnect(&n));
+                if let Some(n) = state.add_to_active_view(node) {
+                    self.send_disconnect(&n);
+                }
             } else {
                 error!(
                     "failed to connect to {:?} during ForwardJoin, ignoring",
@@ -647,7 +646,7 @@ impl<T: Transport> HyParView<T> {
         }
     }
 
-    fn handle_failure(&self, f: &Failure) {}
+    fn handle_failure(&self, _f: &Failure) {}
 
     fn failure_thread(&self, shutdown: Receiver<()>) {
         let failures = self.transport.failures();
@@ -675,7 +674,7 @@ impl<T: Transport> HyParView<T> {
             self_ref.message_thread(mrx);
         }));
         let self_ref = self.clone();
-        let frx = rx.clone();
+        let frx = rx;
         handles.push(thread::spawn(move || self_ref.failure_thread(frx)));
         (tx, handles)
     }
@@ -727,7 +726,7 @@ mod tests {
 
     #[test]
     fn test_join() {
-        let fres = fern::Dispatch::default()
+        let _fres = fern::Dispatch::default()
             .level(log::LevelFilter::Trace)
             .format(|out, message, record| {
                 out.finish(format_args!(

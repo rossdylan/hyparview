@@ -17,10 +17,10 @@ pub struct MessageStore<S = RandomState> {
 impl MessageStore {
     /// Create a new instance of the message store with the provided max size.
     pub fn new(max: usize) -> Self {
-        return MessageStore {
-            max: max,
+        MessageStore {
+            max,
             map: IndexSet::with_capacity(max),
-        };
+        }
     }
 }
 
@@ -28,10 +28,10 @@ impl<S: BuildHasher> MessageStore<S> {
     /// Create a new instance of the message store with the provided max size
     /// and the given custom hasher.
     pub fn with_hasher(max: usize, hash_builder: S) -> Self {
-        return MessageStore {
-            max: max,
+        MessageStore {
+            max,
             map: IndexSet::with_capacity_and_hasher(max, hash_builder),
-        };
+        }
     }
 
     /// Add a message to the message store. If we have reached the limit pop

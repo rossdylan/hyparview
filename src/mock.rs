@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crossbeam_channel::{unbounded, Receiver, Sender};
 use parking_lot::Mutex;
 
+type SendAndRecv = (Sender<super::Message>, Receiver<super::Message>);
 /// MockConnections is a helper structure that tracks all the nodes in a simulated
 /// gossip network. Internally we map between a [Node] and tuple of
 /// ([Sender]<[Message]>, [Receiver]<[Message]>). This allows us to create a
@@ -17,8 +18,7 @@ use parking_lot::Mutex;
 /// [Node]: super::Node
 #[derive(Clone, Debug)]
 pub struct MockConnections {
-    connections:
-        Arc<Mutex<HashMap<super::Node, (Sender<super::Message>, Receiver<super::Message>)>>>,
+    connections: Arc<Mutex<HashMap<super::Node, SendAndRecv>>>,
 }
 
 /// The MockTransport is constructed via [MockConnections::new_transport] and
@@ -37,7 +37,7 @@ pub struct MockTransport {
 impl super::Transport for MockTransport {
     /// Send a Message to the provided Node
     fn send(&self, dest: &super::Node, msg: &super::Message) {
-        if let Err(_) = self.conns.send_to(dest, msg) {
+        if self.conns.send_to(dest, msg).is_err() {
             let tres = self.ftx.send(super::Failure::FailedToSend(dest.clone()));
             if let Err(e) = tres {
                 panic!("mock transport failed: {}", e);
@@ -66,6 +66,12 @@ impl super::Transport for MockTransport {
     }
 }
 
+impl Default for MockConnections {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MockConnections {
     /// Create a new MockConnections instance
     pub fn new() -> Self {
@@ -77,11 +83,11 @@ impl MockConnections {
     /// Used internally by MockTransport to route messages to the intended Node
     fn send_to(&self, dest: &super::Node, msg: &super::Message) -> crate::error::Result<()> {
         let conns = self.connections.lock();
-        if let Some((tx, _)) = conns.get(&dest) {
+        if let Some((tx, _)) = conns.get(dest) {
             tx.send(msg.clone())
                 .map_err(|e| crate::error::Error::ChannelFailure(e.into_inner()))
         } else {
-            return Err(crate::error::Error::UnableToConnect(dest.clone()));
+            Err(crate::error::Error::UnableToConnect(dest.clone()))
         }
     }
 
@@ -90,7 +96,7 @@ impl MockConnections {
         let (tx, rx) = unbounded();
         let (ftx, frx) = unbounded();
         let mut conns = self.connections.lock();
-        conns.insert(node.clone(), (tx.clone(), rx.clone()));
+        conns.insert(node.clone(), (tx, rx.clone()));
         MockTransport {
             conns: self.clone(),
             rx,
