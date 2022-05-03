@@ -1,0 +1,76 @@
+syntax = "proto3";
+package hyparview;
+
+message Empty{}
+
+enum NeighborPriority {
+    UNKNOWN = 0;
+    HIGH = 1;
+    LOW = 2;
+}
+
+// Peer represents a single node from the perspective of the hyparview protocol.
+// It is used as a part of the protocol to uniquely identify a HyParView
+// instance
+message Peer {
+    string host = 1;
+    uint32 port = 2;
+}
+
+message DisconnectRequest {
+    Peer source = 1;
+    bytes id = 2;
+}
+
+message JoinRequest {
+    Peer source = 1;
+    bytes id = 2;
+}
+
+message ForwardJoinRequest {
+    Peer source = 1;
+    bytes id = 2;
+    uint32 ttl = 3;
+}
+
+message NeighborRequest {
+    Peer source = 1;
+    bytes id = 2;
+    NeighborPriority priority = 3;
+}
+
+message NeighborResponse {
+    bool accepted = 1;
+}
+
+message ShuffleRequest {
+    Peer source = 1;
+    bytes id = 2;
+    uint32 ttl = 3;
+    repeated Peer peers = 4;
+}
+
+message ShuffleReplyRequest {
+    Peer source = 1;
+    bytes id = 2;
+    repeated Peer peers = 3;
+}
+
+message DataRequest {
+    Peer source = 1;
+    bytes id = 2;
+    bytes data = 3;
+}
+
+// Our service that defines the methods needed to execute the hyparview protocol
+// TODO(rossdylan): Originally we just had a single OneOf style protocol but
+// I've split it all out, idk if its better
+service Hyparview {
+    rpc Join(JoinRequest) returns(Empty);
+    rpc ForwardJoin(ForwardJoinRequest) returns(Empty);
+    rpc Disconnect(DisconnectRequest) returns(Empty);
+    rpc Neighbor(NeighborRequest) returns(NeighborResponse);
+    rpc Shuffle(ShuffleRequest) returns(Empty);
+    rpc ShuffleReply(ShuffleReplyRequest) returns(Empty);
+    rpc Data(DataRequest) returns (Empty);
+}
