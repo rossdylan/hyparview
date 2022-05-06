@@ -654,38 +654,98 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
 mod tests {
 
     use std::collections::HashMap;
+    use std::fmt::Debug;
+    use std::sync::atomic;
+
+    use futures::stream::FuturesUnordered;
+    use futures::stream::StreamExt;
+    use futures::FutureExt;
+    use tokio::task::JoinHandle;
+    use tonic::transport::Server;
 
     use super::*;
     use crate::error::Result;
     use crate::state::*;
     use crate::transport::*;
-    use futures::stream::FuturesUnordered;
-    use futures::stream::StreamExt;
-    use std::sync::atomic;
-    use tonic::transport::Server;
 
-    /// Generate a new `HyParView` instance hooked up to the `InMemoryConnectionManager`
-    async fn create_instance(
-        peer: &Peer,
-        cm: &InMemoryConnectionManager,
-    ) -> Result<HyParView<InMemoryConnectionManager>> {
-        let hpv = HyParView::with_transport(
-            &peer.host,
-            peer.port as u16,
-            NetworkParameters::default(),
-            cm.clone(),
-        );
-        let ds = cm.register(peer).await?;
-        let hpv_copy = hpv.clone();
-        tokio::spawn(async move {
-            Server::builder()
-                .add_service(crate::proto::hyparview_server::HyparviewServer::new(
-                    hpv_copy,
-                ))
-                .serve_with_incoming(futures::stream::iter(vec![Ok::<_, std::io::Error>(ds)]))
-                .await
-        });
-        Ok(hpv)
+    #[derive(Debug)]
+    struct TestInstanceExtras {
+        signal: Option<tokio::sync::oneshot::Sender<()>>,
+        handle: JoinHandle<()>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct TestInstance {
+        inner: HyParView<InMemoryConnectionManager>,
+        extras: Arc<Mutex<TestInstanceExtras>>,
+    }
+
+    impl std::ops::DerefMut for TestInstance {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.inner
+        }
+    }
+
+    impl std::ops::Deref for TestInstance {
+        type Target = HyParView<InMemoryConnectionManager>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.inner
+        }
+    }
+
+    impl TestInstance {
+        /// Generate a new `HyParView` instance hooked up to the `InMemoryConnectionManager`
+        async fn new(peer: &Peer, cm: &InMemoryConnectionManager) -> Result<Self> {
+            let hpv = HyParView::with_transport(
+                &peer.host,
+                peer.port as u16,
+                NetworkParameters::default(),
+                cm.clone(),
+            );
+            let ds = cm.register(peer).await?;
+            let hpv_copy = hpv.clone();
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            let jh = tokio::spawn(async move {
+                Server::builder()
+                    .add_service(crate::proto::hyparview_server::HyparviewServer::new(
+                        hpv_copy,
+                    ))
+                    .serve_with_incoming_shutdown(
+                        // NOTE(rossdylan): This extra select + pending is used to ensure the tonic
+                        // server future doesn't immediately exit after exhuasting the
+                        // stream::once. Initially the once was an iter and we
+                        // ran into problems where tonic immediately shut down
+                        // after starting the connection handler
+                        futures::stream::select(
+                            futures::stream::once(async { Ok::<_, std::io::Error>(ds) }),
+                            futures::stream::pending(),
+                        ),
+                        rx.map(|_| debug!("graceful shutdown signal recevied, terminating")),
+                    )
+                    .await
+                    .unwrap();
+            });
+            Ok(TestInstance {
+                inner: hpv,
+                extras: Arc::new(Mutex::new(TestInstanceExtras {
+                    signal: Some(tx),
+                    handle: jh,
+                })),
+            })
+        }
+
+        // Trigger a clean shutdown of the underlying tonic server
+        async fn stop(&mut self) {
+            let signal = self.extras.lock().signal.take().unwrap();
+            if signal.send(()).is_err() {
+                error!("failed to send shutdown signal to tonic");
+                return;
+            }
+            if let Err(e) = (&mut self.extras.lock().handle).await {
+                error!("error while shutting down tonic: {}", e);
+            }
+        }
     }
 
     /// Test our network bootstraping by spawning 100 `HyParView` instances and
@@ -704,19 +764,17 @@ mod tests {
             })
         }
         let mut peer_to_inst = HashMap::new();
-        let mut instances = Vec::with_capacity(peers.len());
         // TODO(rossdylan): Throw this into a `FuturesOrdered`
         for peer in peers.iter() {
-            let instance = create_instance(peer, &cm).await?;
-            peer_to_inst.insert(peer.clone(), instance.clone());
-            instances.push(instance);
+            let instance = TestInstance::new(peer, &cm).await?;
+            peer_to_inst.insert(peer.clone(), instance);
         }
 
         // NOTE(rossdylan): In a block to make lifetimes happy with the
         // FuturesUnordered set
         {
             let mut fset = FuturesUnordered::new();
-            for instance in instances.iter_mut() {
+            for (_, instance) in peer_to_inst.iter_mut() {
                 let bs_peer = peers[0].clone();
                 fset.push(instance.init(std::iter::once(bs_peer)));
             }
@@ -728,8 +786,8 @@ mod tests {
         // Periodically check pending messages to wait for protocol convergence
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            let remaining: u64 = instances
-                .iter()
+            let remaining: u64 = peer_to_inst
+                .values()
                 .map(|i| i.pending_msgs.load(atomic::Ordering::SeqCst))
                 .sum();
             info!("{} messages remaining in queues", remaining);
@@ -737,10 +795,12 @@ mod tests {
                 break;
             }
         }
+        for (_, instance) in peer_to_inst.iter_mut() {
+            instance.stop().await
+        }
 
         // Now we attempt to verify network invariants
-        for (index, instance) in instances.iter().enumerate() {
-            let current_peer = &peers[index];
+        for (current_peer, instance) in peer_to_inst.iter() {
             let active_view = instance.active_view();
 
             assert!(current_peer == &instance.me);
@@ -748,7 +808,7 @@ mod tests {
             assert!(
                 active_view.get(current_peer).is_none(),
                 "instance {} contains itself in the active view",
-                peers[index]
+                current_peer
             );
 
             // Verify active view symmetry
