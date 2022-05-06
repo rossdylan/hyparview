@@ -32,6 +32,9 @@ pub enum Error {
     /// The message we received had an invalid ID
     #[error("message identifier invalid")]
     InvalidMessageID,
+    /// We failed to send a data message broadcast to any peers
+    #[error("failed to send broadcast to any peer")]
+    BroadcastFailed,
     /// An unknown error, used as a catch-all
     #[error("unknown error in mocks")]
     Unknown,

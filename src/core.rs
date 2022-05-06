@@ -4,6 +4,8 @@ use std::sync::atomic;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::stream::FuturesOrdered;
+use futures::StreamExt;
 use indexmap::IndexSet;
 use log::*;
 use parking_lot::Mutex;
@@ -103,6 +105,45 @@ impl<C: ConnectionManager> HyParView<C> {
     /// messages that this hyparview instance receives.
     pub fn subscribe(&self) -> broadcast::Receiver<(svix_ksuid::Ksuid, Vec<u8>)> {
         self.broadcast_tx.subscribe()
+    }
+
+    /// Broadcast some data into the gossip network by sending it to all our
+    /// active peers. If we fail to send data to any peers, or there are no
+    /// active peers we return an error
+    pub async fn broadcast(&self, data: &[u8]) -> Result<()> {
+        let peers = self.active_view();
+        let req = DataRequest {
+            source: Some(self.me.clone()),
+            id: gen_msg_id(),
+            data: data.into(),
+        };
+        // NOTE(rossdylan): We do this synchronously instead of pushing it
+        // through the outgoing_task so we can report errors more easily
+        // TODO(rossdylan): Consider extending enqueue_message with an optional
+        // oneshot channel to act as a callback
+        let mut sent = false;
+        {
+            let mut fset = FuturesOrdered::new();
+            for peer in peers.iter() {
+                let req_fut = self.send_data(peer, &req);
+                fset.push(req_fut);
+            }
+            let mut stream = fset.enumerate();
+            while let Some((index, res)) = stream.next().await {
+                let peer = &peers[index];
+                if let Err(e) = res {
+                    warn!("[{}] failed to send broadcast to {}: {}", self.me, peer, e);
+                    self.report_failure(peer);
+                } else {
+                    sent = true;
+                }
+            }
+        }
+        if sent {
+            Ok(())
+        } else {
+            Err(Error::BroadcastFailed)
+        }
     }
 
     pub(crate) fn active_view(&self) -> IndexSet<Peer> {
@@ -300,6 +341,7 @@ impl<C: ConnectionManager> HyParView<C> {
     /// 5. If the Neighbor request failed try again with a different passive
     ///    view peer.
     async fn replace_peer(&self, failed: &Peer) -> Result<()> {
+        let mut attempts = 0;
         loop {
             let (maybe_peer, prio) = {
                 let state = self.state.lock();
@@ -311,7 +353,13 @@ impl<C: ConnectionManager> HyParView<C> {
                 // if the failed peer is the only peer in the active view the
                 // resulting replacement Neighbor request should be High
                 // priority
-                let prio = if state.active_view.len() == 1 {
+                // NOTE(rossdylan): we have an extra condition here for when
+                // all our passive peers reject the request. This is a change
+                // from the paper, and the partisan implementation. Partisan
+                // universally uses a High priority request, the paper uses
+                // only the active view length as the condition. If we don't
+                // add this new condition failure replacement can stall
+                let prio = if state.active_view.len() == 1 || attempts >= state.passive_view.len() {
                     NeighborPriority::High
                 } else {
                     NeighborPriority::Low
@@ -324,14 +372,25 @@ impl<C: ConnectionManager> HyParView<C> {
                         let mut state = self.state.lock();
                         state.active_view.remove(failed);
                         state.add_to_active_view(&peer);
+                        debug!("[{}] replacing {} with {}", self.me, failed, peer);
                         return Ok(());
+                    } else {
+                        debug!(
+                            "[{}] failed to replace {} with {}, peer rejected neighbor request",
+                            self.me, failed, peer
+                        )
                     }
                 } else {
+                    debug!(
+                        "[{}] failed to replace {} with {}, removing from passive view",
+                        self.me, failed, peer
+                    );
                     self.state.lock().passive_view.remove(&peer);
                 }
             } else {
                 return Err(Error::PassiveViewEmpty);
             }
+            attempts += 1;
         }
     }
 
@@ -339,12 +398,15 @@ impl<C: ConnectionManager> HyParView<C> {
     /// the failure algorithm.
     async fn failure_handler(self, mut rx: UnboundedReceiver<Peer>) {
         loop {
-            if let Some(failed_peer) = (rx).recv().await {
-                warn!("peer {} has been marked as failued", failed_peer);
+            if let Some(failed_peer) = rx.recv().await {
+                warn!(
+                    "[{}] peer {} has been marked as failed",
+                    self.me, failed_peer
+                );
                 if let Err(e) = self.replace_peer(&failed_peer).await {
                     warn!(
-                        "unable to replace {}, no healthy peers in passive view: {}",
-                        failed_peer, e
+                        "[{}] unable to replace {}, no healthy peers in passive view: {}",
+                        self.me, failed_peer, e
                     );
                 }
             } else {
@@ -631,11 +693,16 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
             return Ok(Response::new(Empty {}));
         }
         state.record_message(ksuid.bytes());
-        if let Err(e) = self.broadcast_tx.send((ksuid, req_ref.data.clone())) {
-            error!(
-                "[{}] failed to send incoming data to local subscribers: {}",
-                self.me, e
-            );
+
+        // Only send this message to our local inprocess subscribers if we
+        // actually have inproccess subscribers
+        if self.broadcast_tx.receiver_count() > 0 {
+            if let Err(e) = self.broadcast_tx.send((ksuid, req_ref.data.clone())) {
+                error!(
+                    "[{}] failed to send incoming data to local subscribers: {}",
+                    self.me, e
+                );
+            }
         }
         let active_peers = state.active_view.clone();
         for peer in active_peers.into_iter() {
@@ -660,6 +727,8 @@ mod tests {
     use futures::stream::FuturesUnordered;
     use futures::stream::StreamExt;
     use futures::FutureExt;
+    use rand::prelude::IteratorRandom;
+    use rand::thread_rng;
     use tokio::task::JoinHandle;
     use tonic::transport::Server;
 
@@ -696,6 +765,7 @@ mod tests {
 
     impl TestInstance {
         /// Generate a new `HyParView` instance hooked up to the `InMemoryConnectionManager`
+        /// This is used to control the life-cycle of a hyparview instance for tests
         async fn new(peer: &Peer, cm: &InMemoryConnectionManager) -> Result<Self> {
             let hpv = HyParView::with_transport(
                 &peer.host,
@@ -746,6 +816,120 @@ mod tests {
                 error!("error while shutting down tonic: {}", e);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn test_failure_handling() -> Result<()> {
+        tracing_subscriber::fmt::init();
+        let cm = InMemoryConnectionManager::new();
+        let mut peers = Vec::new();
+        for index in 0..50 {
+            peers.push(crate::proto::Peer {
+                host: "127.0.0.1".into(),
+                port: index,
+            })
+        }
+        let mut peer_to_inst = HashMap::new();
+        // TODO(rossdylan): Throw this into a `FuturesOrdered`
+        for peer in peers.iter() {
+            let instance = TestInstance::new(peer, &cm).await?;
+            peer_to_inst.insert(peer.clone(), instance);
+        }
+
+        // NOTE(rossdylan): In a block to make lifetimes happy with the
+        // FuturesUnordered set
+        {
+            let mut fset = FuturesUnordered::new();
+            for (_, instance) in peer_to_inst.iter_mut() {
+                let bs_peer = peers[0].clone();
+                fset.push(instance.init(std::iter::once(bs_peer)));
+            }
+            while let Some(res) = fset.next().await {
+                res?;
+            }
+        }
+
+        // Periodically check pending messages to wait for protocol convergence
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let remaining: u64 = peer_to_inst
+                .values()
+                .map(|i| i.pending_msgs.load(atomic::Ordering::SeqCst))
+                .sum();
+            info!("{} messages remaining in queues", remaining);
+            if remaining == 0 {
+                break;
+            }
+        }
+
+        // shutdown a random instance
+        let rpeer: Peer = peers
+            .iter()
+            .choose(&mut rand::thread_rng())
+            .map(Clone::clone)
+            .unwrap();
+        peer_to_inst.get_mut(&rpeer).unwrap().stop().await;
+        peer_to_inst.remove(&rpeer);
+
+        // Attempt a broadcast into the network
+        let bpeer: Peer = peers
+            .iter()
+            .filter(|p| **p != rpeer)
+            .choose(&mut rand::thread_rng())
+            .map(Clone::clone)
+            .unwrap();
+        let msg = "foobar".as_bytes();
+        peer_to_inst.get(&bpeer).unwrap().broadcast(msg).await?;
+
+        // Periodically check pending messages to wait for protocol convergence
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let remaining: u64 = peer_to_inst
+                .values()
+                .map(|i| i.pending_msgs.load(atomic::Ordering::SeqCst))
+                .sum();
+            info!("{} messages remaining in queues", remaining);
+            if remaining == 0 {
+                break;
+            }
+        }
+
+        // Verify network invariants
+        for (current_peer, instance) in peer_to_inst.iter() {
+            let active_view = instance.active_view();
+
+            assert!(current_peer == &instance.me);
+            // Assert that the hpv instance doesn't contain itself
+            assert!(
+                active_view.get(current_peer).is_none(),
+                "instance {} contains itself in the active view",
+                current_peer
+            );
+
+            // Assert that the failed peer is not in any active views
+            assert!(
+                !active_view.contains(&rpeer),
+                "found failed peer in active view"
+            );
+
+            // Verify active view symmetry
+            for peer in active_view.iter() {
+                let peer_instance = &peer_to_inst[peer];
+                assert!(peer == &peer_instance.me);
+                assert!(
+                    peer_instance.active_view().contains(current_peer),
+                    "active view symmetry between {} and {} not preserved: {}:{:?} -- {}:{:?}",
+                    current_peer,
+                    peer,
+                    current_peer,
+                    active_view,
+                    peer,
+                    peer_instance.active_view(),
+                );
+            }
+        }
+
+        Ok(())
     }
 
     /// Test our network bootstraping by spawning 100 `HyParView` instances and
