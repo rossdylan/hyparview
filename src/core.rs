@@ -2,17 +2,17 @@
 use std::result::Result as StdResult;
 use std::sync::atomic;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use futures::stream::FuturesOrdered;
 use futures::StreamExt;
 use indexmap::IndexSet;
-use log::*;
-use parking_lot::Mutex;
 use svix_ksuid::KsuidLike;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tonic::{Request, Response, Status};
+use tracing::{debug, error, trace, warn};
 
 use crate::error::Error;
 use crate::error::Result;
@@ -147,11 +147,11 @@ impl<C: ConnectionManager> HyParView<C> {
     }
 
     pub(crate) fn active_view(&self) -> IndexSet<Peer> {
-        self.state.lock().active_view.clone()
+        self.state.lock().unwrap().active_view.clone()
     }
 
     pub(crate) fn _passive_view(&self) -> IndexSet<Peer> {
-        self.state.lock().passive_view.clone()
+        self.state.lock().unwrap().passive_view.clone()
     }
 
     async fn send_join(&self, peer: &Peer) -> Result<()> {
@@ -256,9 +256,9 @@ impl<C: ConnectionManager> HyParView<C> {
     /// the `BootstrapSource`
     pub async fn init(&mut self, mut boots: impl BootstrapSource) -> Result<()> {
         while let Some(ref contact_peer) = boots.next_peer()? {
-            self.state.lock().add_to_active_view(contact_peer);
+            self.state.lock().unwrap().add_to_active_view(contact_peer);
             if let Err(e) = self.send_join(contact_peer).await {
-                self.state.lock().disconnect(contact_peer);
+                self.state.lock().unwrap().disconnect(contact_peer);
                 warn!(
                     "failed to contact bootstrap node: {:?}: {}",
                     contact_peer, e
@@ -344,7 +344,7 @@ impl<C: ConnectionManager> HyParView<C> {
         let mut attempts = 0;
         loop {
             let (maybe_peer, prio) = {
-                let state = self.state.lock();
+                let state = self.state.lock().unwrap();
                 // ensure that if a failed peer is reported multiple times we
                 // only execute replacement for it once
                 if !state.active_view.contains(failed) {
@@ -369,7 +369,7 @@ impl<C: ConnectionManager> HyParView<C> {
             if let Some(peer) = maybe_peer {
                 if let Ok(accepted) = self.send_neighbor(&peer, prio).await {
                     if accepted {
-                        let mut state = self.state.lock();
+                        let mut state = self.state.lock().unwrap();
                         state.active_view.remove(failed);
                         state.add_to_active_view(&peer);
                         debug!("[{}] replacing {} with {}", self.me, failed, peer);
@@ -385,7 +385,7 @@ impl<C: ConnectionManager> HyParView<C> {
                         "[{}] failed to replace {} with {}, removing from passive view",
                         self.me, failed, peer
                     );
-                    self.state.lock().passive_view.remove(&peer);
+                    self.state.lock().unwrap().passive_view.remove(&peer);
                 }
             } else {
                 return Err(Error::PassiveViewEmpty);
@@ -424,7 +424,7 @@ impl<C: ConnectionManager> HyParView<C> {
             // be a configuration value in `NetworkParameters`
             tokio::time::sleep(crate::util::jitter(Duration::from_secs(60))).await;
             {
-                let state = self.state.lock();
+                let state = self.state.lock().unwrap();
                 let destination = match state.random_active_peer(None) {
                     None => {
                         debug!("[{}] shuffle aborted, no peers in active view", self.me);
@@ -473,7 +473,7 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
                 source, e
             );
         }
-        let mut state = self.state.lock();
+        let mut state = self.state.lock().unwrap();
         if let Some(dropped) = state.add_to_active_view(source) {
             self.enqueue_message(OutgoingMessage::Disconnect(dropped));
         }
@@ -506,7 +506,7 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
         // in the paper. The formalism has == 0, and the textual has == 1. The
         // correct one is == 1, since without at least one node in our
         // active-view we wouldn't get getting any messages.
-        let mut state = self.state.lock();
+        let mut state = self.state.lock().unwrap();
         if state.active_view.len() == 1 || req_ref.ttl == 0 {
             debug!(
                 "[{}] recieved terminal forward_join from {}, adding to active view",
@@ -555,7 +555,7 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
         }
         let source = req_ref.source.as_ref().unwrap();
         debug!("[{}] recieved disconnect from {}", self.me, source);
-        self.state.lock().disconnect(source);
+        self.state.lock().unwrap().disconnect(source);
         debug_assert!(
             !self.active_view().contains(source),
             "active view contains peer after disconnect request"
@@ -572,7 +572,7 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
             return Err(Status::invalid_argument("no source peer specified"));
         }
         let source = req_ref.source.as_ref().unwrap();
-        let mut state = self.state.lock();
+        let mut state = self.state.lock().unwrap();
         match req_ref.priority() {
             NeighborPriority::Unknown => Err(Status::internal(
                 "unknown NeighborPriority, message corrupted?",
@@ -620,7 +620,7 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
             return Err(Status::invalid_argument("no source peer specified"));
         }
         let source = req_ref.source.as_ref().unwrap();
-        let mut state = self.state.lock();
+        let mut state = self.state.lock().unwrap();
         if req_ref.ttl == 0 {
             debug!("[{}] recieved terminal shuffle from {}", self.me, source);
             // NOTE(rossdylan): The HyParView paper isn't super specific here but
@@ -657,7 +657,7 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
             return Err(Status::invalid_argument("no source peer specified"));
         }
         let source = req_ref.source.as_ref().unwrap();
-        let mut state = self.state.lock();
+        let mut state = self.state.lock().unwrap();
         debug!(
             "[{}] received shuffle-reply from {} with {} peers",
             self.me,
@@ -687,7 +687,7 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
             Ok(k) => k,
         };
 
-        let mut state = self.state.lock();
+        let mut state = self.state.lock().unwrap();
         // If we've seen this message before ignore it
         if state.message_seen(ksuid.bytes()) {
             return Ok(Response::new(Empty {}));
@@ -730,6 +730,7 @@ mod tests {
     use rand::prelude::IteratorRandom;
     use tokio::task::JoinHandle;
     use tonic::transport::Server;
+    use tracing::info;
 
     use super::*;
     use crate::error::Result;
@@ -806,12 +807,12 @@ mod tests {
 
         // Trigger a clean shutdown of the underlying tonic server
         async fn stop(&mut self) {
-            let signal = self.extras.lock().signal.take().unwrap();
+            let signal = self.extras.lock().unwrap().signal.take().unwrap();
             if signal.send(()).is_err() {
                 error!("failed to send shutdown signal to tonic");
                 return;
             }
-            if let Err(e) = (&mut self.extras.lock().handle).await {
+            if let Err(e) = (&mut self.extras.lock().unwrap().handle).await {
                 error!("error while shutting down tonic: {}", e);
             }
         }

@@ -2,12 +2,12 @@
 //! communication between hyparview instances.
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 
 use crate::error::{Error, Result};
 use crate::proto::hyparview_client::HyparviewClient;
 use crate::proto::Peer;
 
-use parking_lot::Mutex;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 use tracing::trace;
@@ -53,18 +53,21 @@ impl Default for DefaultConnectionManager {
 #[async_trait::async_trait]
 impl ConnectionManager for DefaultConnectionManager {
     async fn connect(&self, peer: &Peer) -> Result<HyparviewClient<Channel>> {
-        if let Some(client) = (*self.connections.lock()).get(peer) {
+        if let Some(client) = (*self.connections.lock().unwrap()).get(peer) {
             return Ok(client.clone());
         }
         let ep = Endpoint::from_shared(format!("http://{}:{}", peer.host, peer.port))?;
         let channel = ep.connect().await?;
         let client = HyparviewClient::new(channel);
-        self.connections.lock().insert(peer.clone(), client.clone());
+        self.connections
+            .lock()
+            .unwrap()
+            .insert(peer.clone(), client.clone());
         Ok(client)
     }
 
     async fn disconnect(&self, peer: &Peer) -> Option<HyparviewClient<Channel>> {
-        (*self.connections.lock()).remove(peer)
+        (*self.connections.lock().unwrap()).remove(peer)
     }
 }
 
@@ -107,7 +110,10 @@ impl InMemoryConnectionManager {
             }))
             .await?;
         let hpv_client = HyparviewClient::new(channel);
-        self.connections.lock().insert(peer.clone(), hpv_client);
+        self.connections
+            .lock()
+            .unwrap()
+            .insert(peer.clone(), hpv_client);
         Ok(server)
     }
 }
@@ -122,7 +128,7 @@ impl Default for InMemoryConnectionManager {
 impl ConnectionManager for InMemoryConnectionManager {
     async fn connect(&self, peer: &Peer) -> Result<HyparviewClient<Channel>> {
         trace!("connecting to peer {}", peer);
-        if let Some(client) = (*self.connections.lock()).get(peer) {
+        if let Some(client) = (*self.connections.lock().unwrap()).get(peer) {
             Ok(client.clone())
         } else {
             Err(Error::MockError(format!(
@@ -133,7 +139,7 @@ impl ConnectionManager for InMemoryConnectionManager {
     }
 
     async fn disconnect(&self, peer: &Peer) -> Option<HyparviewClient<Channel>> {
-        (*self.connections.lock()).remove(peer)
+        (*self.connections.lock().unwrap()).remove(peer)
     }
 }
 
