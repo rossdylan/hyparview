@@ -728,7 +728,6 @@ mod tests {
     use futures::stream::StreamExt;
     use futures::FutureExt;
     use rand::prelude::IteratorRandom;
-    use rand::thread_rng;
     use tokio::task::JoinHandle;
     use tonic::transport::Server;
 
@@ -818,9 +817,12 @@ mod tests {
         }
     }
 
+    /// Test the background failure handling system by creating a 50 peer
+    /// network and then removing a single node to ensure that other nodes have
+    /// removed it from their views
     #[tokio::test]
     async fn test_failure_handling() -> Result<()> {
-        tracing_subscriber::fmt::init();
+        tracing_subscriber::fmt::try_init();
         let cm = InMemoryConnectionManager::new();
         let mut peers = Vec::new();
         for index in 0..50 {
@@ -868,6 +870,19 @@ mod tests {
             .choose(&mut rand::thread_rng())
             .map(Clone::clone)
             .unwrap();
+
+        // Figure out what peers are connected to our selected peer
+        let connected_to_rpeer: Vec<Peer> = peer_to_inst
+            .iter()
+            .filter_map(|(p, i)| {
+                if i.active_view().contains(&rpeer) {
+                    Some(p.clone())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         peer_to_inst.get_mut(&rpeer).unwrap().stop().await;
         peer_to_inst.remove(&rpeer);
 
@@ -894,51 +909,28 @@ mod tests {
             }
         }
 
-        // Verify network invariants
-        for (current_peer, instance) in peer_to_inst.iter() {
-            let active_view = instance.active_view();
-
-            assert!(current_peer == &instance.me);
-            // Assert that the hpv instance doesn't contain itself
-            assert!(
-                active_view.get(current_peer).is_none(),
-                "instance {} contains itself in the active view",
-                current_peer
-            );
+        // Verify failed node has been removed from the active views it was in
+        // previously.
+        for peer in connected_to_rpeer.iter() {
+            let active_view = peer_to_inst[peer].active_view();
 
             // Assert that the failed peer is not in any active views
             assert!(
                 !active_view.contains(&rpeer),
                 "found failed peer in active view"
             );
-
-            // Verify active view symmetry
-            for peer in active_view.iter() {
-                let peer_instance = &peer_to_inst[peer];
-                assert!(peer == &peer_instance.me);
-                assert!(
-                    peer_instance.active_view().contains(current_peer),
-                    "active view symmetry between {} and {} not preserved: {}:{:?} -- {}:{:?}",
-                    current_peer,
-                    peer,
-                    current_peer,
-                    active_view,
-                    peer,
-                    peer_instance.active_view(),
-                );
-            }
         }
 
         Ok(())
     }
 
-    /// Test our network bootstraping by spawning 100 `HyParView` instances and
-    /// connecting them all together using the first instance as the bootstrap.
-    /// This acts a bit like an initial stress-test to ensure on something like
-    /// a mass reboot the network recovers quickly
+    /// Test the network bootstrap process by spawning 100 `HyParView` instances
+    /// and connecting them all together using the first instance as the
+    /// bootstrap. This acts a bit like an initial stress-test to ensure on
+    /// something like a mass reboot the network recovers quickly
     #[tokio::test]
     async fn test_init() -> Result<()> {
-        tracing_subscriber::fmt::init();
+        tracing_subscriber::fmt::try_init();
         let cm = InMemoryConnectionManager::new();
         let mut peers = Vec::new();
         for index in 0..100 {

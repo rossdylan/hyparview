@@ -13,8 +13,8 @@ use crate::proto::Peer;
 /// from the HyParView paper.
 const PASSIVE_SCALE_FACTOR: f64 = 6.0;
 
-/// The active scale factor is used to scale the active-view which overwise could;
-/// be zero in some cases.
+/// The active scale factor is used to scale the active-view which otherwise
+/// could be zero in some cases.
 const ACTIVE_SCALE_FACTOR: f64 = 1.0;
 
 const ACTIVE_RANDOM_WALK_LENGTH: u32 = 6;
@@ -119,14 +119,14 @@ impl Default for NetworkParameters {
 /// The State structure is used to track internal hyparview protocol state such
 /// as active and passive views, and initial network parameters.
 #[derive(Debug, Clone)]
-pub struct State {
+pub(crate) struct State {
     me: Peer,
     /// The initial parameters we set for executing the hyparview protocol
-    pub params: NetworkParameters,
+    pub(crate) params: NetworkParameters,
     /// The set of peers that make up the active-view
-    pub active_view: IndexSet<Peer>,
+    pub(crate) active_view: IndexSet<Peer>,
     /// The set of peers that make up the passive-view
-    pub passive_view: IndexSet<Peer>,
+    pub(crate) passive_view: IndexSet<Peer>,
     // TODO(rossdylan): We might be able to get away with something like a bloom
     // filter here to increase space efficiency.
     messages: MessageStore,
@@ -142,7 +142,7 @@ fn random_node_from_view(view: &IndexSet<Peer>) -> Option<Peer> {
 impl State {
     /// Given a node that represents this instance, and the parameters for our
     /// network create a new state.
-    pub fn new(me: Peer, params: NetworkParameters) -> Self {
+    pub(crate) fn new(me: Peer, params: NetworkParameters) -> Self {
         let asize = params.active_size() as usize;
         let psize = params.passive_size() as usize;
         State {
@@ -156,7 +156,7 @@ impl State {
 
     /// Select Kp nodes from the passive-view and Ka nodes from the active-view
     /// to service a shuffle request
-    pub fn select_shuffle_peers(&self, ignore: Option<&Peer>) -> Vec<Peer> {
+    pub(crate) fn select_shuffle_peers(&self, ignore: Option<&Peer>) -> Vec<Peer> {
         let len = self.active_view.len();
         let mut nodes = Vec::with_capacity(self.params.ka + self.params.kp);
         nodes.extend(
@@ -179,7 +179,7 @@ impl State {
     }
 
     /// Select a single random peer from our active view
-    pub fn random_active_peer(&self, ignore: Option<&Peer>) -> Option<Peer> {
+    pub(crate) fn random_active_peer(&self, ignore: Option<&Peer>) -> Option<Peer> {
         self.active_view
             .iter()
             .filter(|n| ignore.is_none() || *n != ignore.unwrap())
@@ -188,7 +188,7 @@ impl State {
     }
 
     /// Generate a vector of randomly chosen peers from our passive view
-    pub fn random_passive_peers(&self, ignore: Option<&Peer>, len: usize) -> Vec<Peer> {
+    pub(crate) fn random_passive_peers(&self, ignore: Option<&Peer>, len: usize) -> Vec<Peer> {
         let len = if len > self.passive_view.len() {
             self.passive_view.len()
         } else {
@@ -205,7 +205,7 @@ impl State {
     }
 
     /// Select a single random peer from our passive view
-    pub fn random_passive_peer(&self) -> Option<Peer> {
+    pub(crate) fn random_passive_peer(&self) -> Option<Peer> {
         self.passive_view
             .iter()
             .choose(&mut rand::thread_rng())
@@ -214,7 +214,7 @@ impl State {
 
     /// Add the given peer to the active view, and if the view is full return
     /// a peer that has been dropped to make room
-    pub fn add_to_active_view(&mut self, peer: &Peer) -> Option<Peer> {
+    pub(crate) fn add_to_active_view(&mut self, peer: &Peer) -> Option<Peer> {
         if self.active_view.contains(peer) || *peer == self.me {
             return None;
         }
@@ -239,7 +239,7 @@ impl State {
 
     /// Handle a disconnect request by attempting to remove the peer from our
     /// active view and adding it to our passive view
-    pub fn disconnect(&mut self, peer: &Peer) {
+    pub(crate) fn disconnect(&mut self, peer: &Peer) {
         let removed = self.active_view.remove(peer);
         if removed {
             trace!("[{}] removed {} from active view", self.me, peer);
@@ -248,7 +248,7 @@ impl State {
     }
 
     /// Add the given peer to the passive view.
-    pub fn add_to_passive_view(&mut self, peer: &Peer) {
+    pub(crate) fn add_to_passive_view(&mut self, peer: &Peer) {
         if self.passive_view.contains(peer) || self.active_view.contains(peer) || self.me == *peer {
             return;
         }
@@ -260,12 +260,12 @@ impl State {
     }
 
     /// Given a message ID, record that we have seen it
-    pub fn record_message(&mut self, mid: &[u8; 20]) {
+    pub(crate) fn record_message(&mut self, mid: &[u8; 20]) {
         self.messages.insert(mid)
     }
 
     /// Check to see if we have seen the given message ID before
-    pub fn message_seen(&self, mid: &[u8]) -> bool {
+    pub(crate) fn message_seen(&self, mid: &[u8]) -> bool {
         self.messages.contains(mid)
     }
 }

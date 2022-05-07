@@ -1,9 +1,9 @@
 //! Module for the set of errors the hyparview lib uses
 
-/// A customized Result type for use with thiserror
+/// A customized Result type for use with [`thiserror`]
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// A custom Error type defined using thiserror
+/// A custom Error type defined using [`thiserror`].
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     /// We have already initialized the hyparview instance. Calling the init

@@ -15,8 +15,8 @@ use tracing::trace;
 /// ConnectionManager is a trait to allow for different kinds of connection
 /// management within the hyparview implementation. This is what will let us
 /// mock out the network bits for testing
-/// TODO(rossdylan): We should see about making this generic across any tower
-/// service instead of just channel
+// TODO(rossdylan): We should see about making this generic across any tower
+// service instead of just channel
 #[async_trait::async_trait]
 pub trait ConnectionManager: Send + Sync + Clone {
     /// Attempt to connect to the given peer, or return an existing connection
@@ -68,15 +68,17 @@ impl ConnectionManager for DefaultConnectionManager {
     }
 }
 
-/// A mock conneciton manager using `tokio::io::duplex to build in-memory links
-/// between peers.
+/// A mock conneciton manager using [`tokio::io::duplex`] to build in-memory links
+/// between peers. This is used in tests for mocking out the TCP based
+/// connections between peers.
 #[derive(Debug, Clone)]
 pub struct InMemoryConnectionManager {
     connections: Arc<Mutex<HashMap<Peer, HyparviewClient<Channel>>>>,
 }
 
 impl InMemoryConnectionManager {
-    /// Construct a new `InMemoryConnectionManager` for use in tests
+    /// Construct a new a [`ConnectionManager`] used for mocking peer to peer
+    /// communications in tests.
     pub fn new() -> Self {
         InMemoryConnectionManager {
             connections: Default::default(),
@@ -85,8 +87,8 @@ impl InMemoryConnectionManager {
 
     /// Given a `Peer` structure build and store the internal `tokio::io::DuplexStream`
     /// structures and return the server side. Internally everything works pretty
-    /// much the same as `DefaultConnectionManager` since we use the duplex stream
-    /// to construct a normal `tonic::transport::Channel`
+    /// much the same as [`DefaultConnectionManager`] since we use the duplex stream
+    /// to construct a normal [`tonic::transport::Channel`]
     pub async fn register(&self, peer: &Peer) -> Result<tokio::io::DuplexStream> {
         let (client, server) = tokio::io::duplex(1024);
         let mut some_client = Some(client);
