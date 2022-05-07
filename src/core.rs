@@ -766,14 +766,15 @@ mod tests {
     impl TestInstance {
         /// Generate a new `HyParView` instance hooked up to the `InMemoryConnectionManager`
         /// This is used to control the life-cycle of a hyparview instance for tests
-        async fn new(peer: &Peer, cm: &InMemoryConnectionManager) -> Result<Self> {
+        async fn new(peer: &Peer, cg: &InMemoryConnectionGraph) -> Result<Self> {
+            let manager = cg.new_manager();
             let hpv = HyParView::with_transport(
                 &peer.host,
                 peer.port as u16,
                 NetworkParameters::default(),
-                cm.clone(),
+                manager,
             );
-            let ds = cm.register(peer).await?;
+            let incoming = cg.register(peer).await?;
             let hpv_copy = hpv.clone();
             let (tx, rx) = tokio::sync::oneshot::channel();
             let jh = tokio::spawn(async move {
@@ -782,15 +783,8 @@ mod tests {
                         hpv_copy,
                     ))
                     .serve_with_incoming_shutdown(
-                        // NOTE(rossdylan): This extra select + pending is used to ensure the tonic
-                        // server future doesn't immediately exit after exhuasting the
-                        // stream::once. Initially the once was an iter and we
-                        // ran into problems where tonic immediately shut down
-                        // after starting the connection handler
-                        futures::stream::select(
-                            futures::stream::once(async { Ok::<_, std::io::Error>(ds) }),
-                            futures::stream::pending(),
-                        ),
+                        tokio_stream::wrappers::ReceiverStream::new(incoming)
+                            .map(Ok::<_, std::io::Error>),
                         rx.map(|_| debug!("graceful shutdown signal recevied, terminating")),
                     )
                     .await
@@ -824,7 +818,7 @@ mod tests {
     #[tokio::test]
     async fn test_failure_handling() -> Result<()> {
         tracing_subscriber::fmt::try_init();
-        let cm = InMemoryConnectionManager::new();
+        let cg = InMemoryConnectionGraph::new();
         let mut peers = Vec::new();
         for index in 0..50 {
             peers.push(crate::proto::Peer {
@@ -835,7 +829,7 @@ mod tests {
         let mut peer_to_inst = HashMap::new();
         // TODO(rossdylan): Throw this into a `FuturesOrdered`
         for peer in peers.iter() {
-            let instance = TestInstance::new(peer, &cm).await?;
+            let instance = TestInstance::new(peer, &cg).await?;
             peer_to_inst.insert(peer.clone(), instance);
         }
 
@@ -932,7 +926,7 @@ mod tests {
     #[tokio::test]
     async fn test_init() -> Result<()> {
         tracing_subscriber::fmt::try_init();
-        let cm = InMemoryConnectionManager::new();
+        let cg = InMemoryConnectionGraph::new();
         let mut peers = Vec::new();
         for index in 0..100 {
             peers.push(crate::proto::Peer {
@@ -943,7 +937,7 @@ mod tests {
         let mut peer_to_inst = HashMap::new();
         // TODO(rossdylan): Throw this into a `FuturesOrdered`
         for peer in peers.iter() {
-            let instance = TestInstance::new(peer, &cm).await?;
+            let instance = TestInstance::new(peer, &cg).await?;
             peer_to_inst.insert(peer.clone(), instance);
         }
 

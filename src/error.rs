@@ -35,6 +35,9 @@ pub enum Error {
     /// We failed to send a data message broadcast to any peers
     #[error("failed to send broadcast to any peer")]
     BroadcastFailed,
+    /// We attempted to double register a peer's server instance
+    #[error("a mock server has already been registered for this peer")]
+    MockServerAlreadyRegistered,
     /// An unknown error, used as a catch-all
     #[error("unknown error in mocks")]
     Unknown,

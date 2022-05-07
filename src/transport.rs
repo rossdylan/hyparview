@@ -8,6 +8,8 @@ use crate::error::{Error, Result};
 use crate::proto::hyparview_client::HyparviewClient;
 use crate::proto::Peer;
 
+use tokio::io::DuplexStream;
+use tokio::sync::mpsc;
 use tonic::transport::{Channel, Endpoint, Uri};
 use tower::service_fn;
 use tracing::trace;
@@ -71,56 +73,91 @@ impl ConnectionManager for DefaultConnectionManager {
     }
 }
 
+/// Provide a connection graph between HyParView instances using in-memory
+/// channels instead of TCP
+#[derive(Debug, Clone)]
+pub struct InMemoryConnectionGraph {
+    /// A mapping between a given peer and the [`mpsc::Sender`] we
+    /// use to transmit new [`DuplexStream`] instances to a peer's tonic server
+    /// This is used to replicate the full tcp connection lifecycle without
+    /// actually using tcp
+    incoming_channels: Arc<Mutex<HashMap<Peer, mpsc::Sender<DuplexStream>>>>,
+}
+
+impl Default for InMemoryConnectionGraph {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl InMemoryConnectionGraph {
+    /// Create a new connection graph
+    pub fn new() -> Self {
+        InMemoryConnectionGraph {
+            incoming_channels: Default::default(),
+        }
+    }
+
+    /// Register a HyParView server instance with the connection graph so it
+    /// can receive [`DuplexStream`] instances when other HyParView instnaces
+    /// want to connect to it
+    pub async fn register(&self, peer: &Peer) -> Result<mpsc::Receiver<DuplexStream>> {
+        let mut channels = self.incoming_channels.lock().unwrap();
+        if channels.contains_key(peer) {
+            return Err(Error::MockServerAlreadyRegistered);
+        }
+        let (tx, rx) = mpsc::channel::<DuplexStream>(1024); // yolo
+        channels.insert(peer.clone(), tx);
+        Ok(rx)
+    }
+
+    /// Attempt to construct a [`DuplexStream`] to the requested peer server
+    /// instance. If the server has shutdown, or hasn't been registered an error
+    /// will be returned
+    pub async fn connect(&self, dest: &Peer) -> Result<DuplexStream> {
+        let maybe_sender = self
+            .incoming_channels
+            .lock()
+            .unwrap()
+            .get(dest)
+            .map(Clone::clone);
+        if let Some(sender) = maybe_sender {
+            let (tx, rx) = tokio::io::duplex(1024);
+            if sender.send(rx).await.is_err() {
+                Err(Error::MockError(
+                    "failed to send DuplexStream to server".into(),
+                ))
+            } else {
+                Ok(tx)
+            }
+        } else {
+            Err(Error::MockError("requested peer does not exit".into()))
+        }
+    }
+
+    /// Construct a new manager for a given peer. Internally we pass a clone of
+    /// ourselves to the manager so it can create new connections to peers
+    pub fn new_manager(&self) -> InMemoryConnectionManager {
+        InMemoryConnectionManager::new(self.clone())
+    }
+}
 /// A mock conneciton manager using [`tokio::io::duplex`] to build in-memory links
 /// between peers. This is used in tests for mocking out the TCP based
 /// connections between peers.
 #[derive(Debug, Clone)]
 pub struct InMemoryConnectionManager {
+    graph: InMemoryConnectionGraph,
     connections: Arc<Mutex<HashMap<Peer, HyparviewClient<Channel>>>>,
 }
 
 impl InMemoryConnectionManager {
     /// Construct a new a [`ConnectionManager`] used for mocking peer to peer
     /// communications in tests.
-    pub fn new() -> Self {
+    pub fn new(graph: InMemoryConnectionGraph) -> Self {
         InMemoryConnectionManager {
+            graph,
             connections: Default::default(),
         }
-    }
-
-    /// Given a `Peer` structure build and store the internal `tokio::io::DuplexStream`
-    /// structures and return the server side. Internally everything works pretty
-    /// much the same as [`DefaultConnectionManager`] since we use the duplex stream
-    /// to construct a normal [`tonic::transport::Channel`]
-    pub async fn register(&self, peer: &Peer) -> Result<tokio::io::DuplexStream> {
-        let (client, server) = tokio::io::duplex(1024);
-        let mut some_client = Some(client);
-        let channel = Endpoint::try_from(format!("http://[::]:{}", peer.port))?
-            .connect_with_connector(service_fn(move |_: Uri| {
-                let client = some_client.take();
-                async move {
-                    match client {
-                        Some(c) => Ok(c),
-                        None => Err(std::io::Error::new(
-                            std::io::ErrorKind::Other,
-                            "Client already taken",
-                        )),
-                    }
-                }
-            }))
-            .await?;
-        let hpv_client = HyparviewClient::new(channel);
-        self.connections
-            .lock()
-            .unwrap()
-            .insert(peer.clone(), hpv_client);
-        Ok(server)
-    }
-}
-
-impl Default for InMemoryConnectionManager {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
@@ -128,13 +165,34 @@ impl Default for InMemoryConnectionManager {
 impl ConnectionManager for InMemoryConnectionManager {
     async fn connect(&self, peer: &Peer) -> Result<HyparviewClient<Channel>> {
         trace!("connecting to peer {}", peer);
-        if let Some(client) = (*self.connections.lock().unwrap()).get(peer) {
-            Ok(client.clone())
+        let maybe_client = (*self.connections.lock().unwrap())
+            .get(peer)
+            .map(Clone::clone);
+        if let Some(client) = maybe_client {
+            Ok(client)
         } else {
-            Err(Error::MockError(format!(
-                "peer {} not found in InMemoryConnectionManager",
-                peer
-            )))
+            let client = self.graph.connect(peer).await?;
+            let mut some_client = Some(client);
+            let channel = Endpoint::try_from(format!("http://[::]:{}", peer.port))?
+                .connect_with_connector(service_fn(move |_: Uri| {
+                    let client = some_client.take();
+                    async move {
+                        match client {
+                            Some(c) => Ok(c),
+                            None => Err(std::io::Error::new(
+                                std::io::ErrorKind::Other,
+                                "mock client already taken",
+                            )),
+                        }
+                    }
+                }))
+                .await?;
+            let hpv_client = HyparviewClient::new(channel);
+            self.connections
+                .lock()
+                .unwrap()
+                .insert(peer.clone(), hpv_client.clone());
+            Ok(hpv_client)
         }
     }
 
