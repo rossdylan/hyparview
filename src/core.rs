@@ -369,9 +369,7 @@ impl<C: ConnectionManager> HyParView<C> {
             if let Some(peer) = maybe_peer {
                 if let Ok(accepted) = self.send_neighbor(&peer, prio).await {
                     if accepted {
-                        let mut state = self.state.lock().unwrap();
-                        state.active_view.remove(failed);
-                        state.add_to_active_view(&peer);
+                        self.state.lock().unwrap().replace_peer(failed, &peer);
                         debug!("[{}] replacing {} with {}", self.me, failed, peer);
                         return Ok(());
                     } else {
@@ -812,6 +810,8 @@ mod tests {
         }
     }
 
+    /// Given a map of [`TestInstance`] structs poll their pending message
+    /// counts to wait for all instances to stop processing message backlogs.
     async fn wait_for_convergence(insts: &HashMap<Peer, TestInstance>) {
         // Periodically check pending messages to wait for protocol convergence
         loop {

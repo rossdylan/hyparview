@@ -16,6 +16,7 @@
 pub mod core;
 pub mod error;
 pub(crate) mod message_store;
+pub(crate) mod metrics;
 pub mod state;
 pub mod transport;
 pub(crate) mod util;

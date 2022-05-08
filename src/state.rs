@@ -130,6 +130,7 @@ pub(crate) struct State {
     // TODO(rossdylan): We might be able to get away with something like a bloom
     // filter here to increase space efficiency.
     messages: MessageStore,
+    metrics: crate::metrics::StateMetrics,
 }
 
 /// Given an `IndexSet<Peer>` representing a hyparview view we extract a random
@@ -151,6 +152,7 @@ impl State {
             active_view: IndexSet::with_capacity(asize),
             passive_view: IndexSet::with_capacity(psize),
             messages: MessageStore::new(params.message_history()),
+            metrics: crate::metrics::StateMetrics::new(),
         }
     }
 
@@ -233,6 +235,8 @@ impl State {
             self.add_to_passive_view(dn);
         }
         self.active_view.insert(peer.clone());
+        self.metrics
+            .record_view_sizes(self.active_view.len(), self.passive_view.len());
         trace!("[{}] added {} to active view", self.me, peer);
         dropped
     }
@@ -257,6 +261,17 @@ impl State {
             self.passive_view.remove(&to_drop);
         }
         self.passive_view.insert(peer.clone());
+        self.metrics
+            .record_view_sizes(self.active_view.len(), self.passive_view.len());
+    }
+
+    /// Replace a failed peer with one from the passive view
+    pub(crate) fn replace_peer(&mut self, failed: &Peer, replacement: &Peer) {
+        self.active_view.remove(failed);
+        self.passive_view.remove(replacement);
+        self.active_view.insert(replacement.clone());
+        self.metrics
+            .record_view_sizes(self.active_view.len(), self.passive_view.len());
     }
 
     /// Given a message ID, record that we have seen it
