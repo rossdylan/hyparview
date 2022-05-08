@@ -730,7 +730,7 @@ mod tests {
     use rand::prelude::IteratorRandom;
     use tokio::task::JoinHandle;
     use tonic::transport::Server;
-    use tracing::info;
+    use tracing::debug;
 
     use super::*;
     use crate::error::Result;
@@ -812,6 +812,21 @@ mod tests {
         }
     }
 
+    async fn wait_for_convergence(insts: &HashMap<Peer, TestInstance>) {
+        // Periodically check pending messages to wait for protocol convergence
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let remaining: u64 = insts
+                .values()
+                .map(|i| i.pending_msgs.load(atomic::Ordering::SeqCst))
+                .sum();
+            debug!("{} messages remaining in queues", remaining);
+            if remaining == 0 {
+                break;
+            }
+        }
+    }
+
     /// Test the background failure handling system by creating a 50 peer
     /// network and then removing a single node to ensure that other nodes have
     /// removed it from their views
@@ -847,17 +862,7 @@ mod tests {
         }
 
         // Periodically check pending messages to wait for protocol convergence
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            let remaining: u64 = peer_to_inst
-                .values()
-                .map(|i| i.pending_msgs.load(atomic::Ordering::SeqCst))
-                .sum();
-            info!("{} messages remaining in queues", remaining);
-            if remaining == 0 {
-                break;
-            }
-        }
+        wait_for_convergence(&peer_to_inst).await;
 
         // shutdown a random instance
         let rpeer: Peer = peers
@@ -892,17 +897,7 @@ mod tests {
         peer_to_inst.get(&bpeer).unwrap().broadcast(msg).await?;
 
         // Periodically check pending messages to wait for protocol convergence
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            let remaining: u64 = peer_to_inst
-                .values()
-                .map(|i| i.pending_msgs.load(atomic::Ordering::SeqCst))
-                .sum();
-            info!("{} messages remaining in queues", remaining);
-            if remaining == 0 {
-                break;
-            }
-        }
+        wait_for_convergence(&peer_to_inst).await;
 
         // Verify failed node has been removed from the active views it was in
         // previously.
@@ -955,20 +950,7 @@ mod tests {
         }
 
         // Periodically check pending messages to wait for protocol convergence
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            let remaining: u64 = peer_to_inst
-                .values()
-                .map(|i| i.pending_msgs.load(atomic::Ordering::SeqCst))
-                .sum();
-            info!("{} messages remaining in queues", remaining);
-            if remaining == 0 {
-                break;
-            }
-        }
-        for (_, instance) in peer_to_inst.iter_mut() {
-            instance.stop().await
-        }
+        wait_for_convergence(&peer_to_inst).await;
 
         // Now we attempt to verify network invariants
         for (current_peer, instance) in peer_to_inst.iter() {

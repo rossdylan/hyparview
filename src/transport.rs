@@ -8,6 +8,7 @@ use crate::error::{Error, Result};
 use crate::proto::hyparview_client::HyparviewClient;
 use crate::proto::Peer;
 
+use lru::LruCache;
 use tokio::io::DuplexStream;
 use tokio::sync::mpsc;
 use tonic::transport::{Channel, Endpoint, Uri};
@@ -34,14 +35,15 @@ pub trait ConnectionManager: Send + Sync + Clone {
 /// by the peer struct.
 #[derive(Clone, Debug)]
 pub struct DefaultConnectionManager {
-    connections: Arc<Mutex<HashMap<Peer, HyparviewClient<Channel>>>>,
+    connections: Arc<Mutex<LruCache<Peer, HyparviewClient<Channel>>>>,
 }
 
 impl DefaultConnectionManager {
     /// Construct an new DefaultConnectionManager
     pub fn new() -> Self {
         DefaultConnectionManager {
-            connections: Default::default(),
+            // NOTE(rossdylan): 32 connections chosen by ~*science*~
+            connections: Arc::new(Mutex::new(LruCache::new(32))),
         }
     }
 }
@@ -64,12 +66,12 @@ impl ConnectionManager for DefaultConnectionManager {
         self.connections
             .lock()
             .unwrap()
-            .insert(peer.clone(), client.clone());
+            .put(peer.clone(), client.clone());
         Ok(client)
     }
 
     async fn disconnect(&self, peer: &Peer) -> Option<HyparviewClient<Channel>> {
-        (*self.connections.lock().unwrap()).remove(peer)
+        (*self.connections.lock().unwrap()).pop(peer)
     }
 }
 
@@ -147,7 +149,7 @@ impl InMemoryConnectionGraph {
 #[derive(Debug, Clone)]
 pub struct InMemoryConnectionManager {
     graph: InMemoryConnectionGraph,
-    connections: Arc<Mutex<HashMap<Peer, HyparviewClient<Channel>>>>,
+    connections: Arc<Mutex<LruCache<Peer, HyparviewClient<Channel>>>>,
 }
 
 impl InMemoryConnectionManager {
@@ -156,7 +158,7 @@ impl InMemoryConnectionManager {
     pub fn new(graph: InMemoryConnectionGraph) -> Self {
         InMemoryConnectionManager {
             graph,
-            connections: Default::default(),
+            connections: Arc::new(Mutex::new(LruCache::new(32))),
         }
     }
 }
@@ -191,13 +193,13 @@ impl ConnectionManager for InMemoryConnectionManager {
             self.connections
                 .lock()
                 .unwrap()
-                .insert(peer.clone(), hpv_client.clone());
+                .put(peer.clone(), hpv_client.clone());
             Ok(hpv_client)
         }
     }
 
     async fn disconnect(&self, peer: &Peer) -> Option<HyparviewClient<Channel>> {
-        (*self.connections.lock().unwrap()).remove(peer)
+        (*self.connections.lock().unwrap()).pop(peer)
     }
 }
 

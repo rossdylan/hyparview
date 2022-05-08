@@ -6,17 +6,18 @@ edition = "2021"
 
 [dependencies]
 async-trait = "0.1.53"
-thiserror = "1"
 futures = "0.3"
+indexmap = "1.8"
+lru = "0.7"
+prost = "0.10"
+rand = "0.8"
+svix-ksuid = "0.6"
+thiserror = "1"
 tokio = {version = "1.18", features = ["full"]}
 tokio-stream = "0.1.8"
-tracing = "0.1"
-indexmap = "1.8"
-svix-ksuid = "0.6"
-rand = "0.8"
 tonic = "0.7"
 tower = "0.4"
-prost = "0.10"
+tracing = "0.1"
 
 [dev-dependencies]
 tracing-subscriber = "0.3"
