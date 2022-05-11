@@ -33,3 +33,32 @@ impl std::fmt::Debug for StateMetrics {
         f.debug_struct("StateMetrics").finish_non_exhaustive()
     }
 }
+
+#[derive(Clone)]
+pub struct ServerMetrics {
+    pending_messages: Gauge,
+}
+
+impl ServerMetrics {
+    pub fn new() -> Self {
+        describe_gauge!(
+            "hyparview_pending_messages",
+            "how many messages are in our outgoing messages queue"
+        );
+        Self {
+            pending_messages: register_gauge!("hyparview_pending_messages"),
+        }
+    }
+    pub fn incr_pending(&self) {
+        self.pending_messages.increment(1.0);
+    }
+    pub fn decr_pending(&self) {
+        self.pending_messages.decrement(1.0)
+    }
+}
+
+impl std::fmt::Debug for ServerMetrics {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerMetrics").finish_non_exhaustive()
+    }
+}

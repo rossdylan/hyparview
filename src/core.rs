@@ -53,6 +53,7 @@ pub struct HyParView<C: ConnectionManager + 'static> {
     pending_msgs: Arc<atomic::AtomicU64>,
     state: Arc<Mutex<State>>,
     broadcast_tx: Arc<broadcast::Sender<(svix_ksuid::Ksuid, Vec<u8>)>>,
+    metrics: crate::metrics::ServerMetrics,
 }
 
 impl HyParView<DefaultConnectionManager> {
@@ -91,6 +92,7 @@ impl<C: ConnectionManager> HyParView<C> {
             pending_msgs: Arc::new(Default::default()),
             state: Arc::new(Mutex::new(State::new(me, params))),
             broadcast_tx: Arc::new(broadcast_tx),
+            metrics: crate::metrics::ServerMetrics::new(),
         };
         // NOTE(rossdylan): I really don't like having HyParView::new(...) being
         // stateful, but its kinda the only way I can make the channels work
@@ -284,6 +286,7 @@ impl<C: ConnectionManager> HyParView<C> {
     /// queue. It also increments our pending messages counter so we have an
     /// idea of what our backlog is like.
     fn enqueue_message(&self, msg: OutgoingMessage) {
+        self.metrics.incr_pending();
         self.pending_msgs.fetch_add(1, atomic::Ordering::SeqCst);
         self.outgoing_msgs.send(msg).unwrap();
     }
@@ -296,6 +299,7 @@ impl<C: ConnectionManager> HyParView<C> {
         trace!("[{}] outgoing task spawned", self.me);
         loop {
             if let Some(ref msg) = rx.recv().await {
+                self.metrics.decr_pending();
                 self.pending_msgs.fetch_sub(1, atomic::Ordering::SeqCst);
                 let (res, dest) = match msg {
                     OutgoingMessage::ForwardJoin(src, dest, ttl) => {
