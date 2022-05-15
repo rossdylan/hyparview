@@ -28,12 +28,32 @@ use crate::transport::{BootstrapSource, ConnectionManager, DefaultConnectionMana
 /// messages to other peers
 #[derive(Clone, Debug)]
 enum OutgoingMessage {
-    ForwardJoin(Peer, Peer, u32),
-    Disconnect(Peer),
-    Neighbor(Peer, NeighborPriority),
-    Shuffle(Peer, Vec<Peer>, u32),
-    ShuffleReply(Peer, Vec<Peer>),
-    Data(Peer, DataRequest),
+    ForwardJoin {
+        src: Peer,
+        dest: Peer,
+        ttl: u32,
+    },
+    Disconnect {
+        dest: Peer,
+    },
+    Neighbor {
+        dest: Peer,
+        prio: NeighborPriority,
+    },
+    Shuffle {
+        src: Peer,
+        dest: Peer,
+        peers: Vec<Peer>,
+        ttl: u32,
+    },
+    ShuffleReply {
+        dest: Peer,
+        peers: Vec<Peer>,
+    },
+    Data {
+        dest: Peer,
+        req: DataRequest,
+    },
 }
 /// Implements the HyParView protocol over a generic transport layer. Messages
 /// from the transport layer are recieved over a channel. The protocol is driven
@@ -225,11 +245,17 @@ impl<C: ConnectionManager> HyParView<C> {
     /// Send a shuffle message to the given peer with the given TTL.
     /// This is used to execute a random walk using the PRWL constant as the
     /// initial TTL.
-    async fn send_shuffle(&self, peer: &Peer, ttl: u32, peers: &[Peer]) -> Result<()> {
+    async fn send_shuffle(
+        &self,
+        source: &Peer,
+        peer: &Peer,
+        ttl: u32,
+        peers: &[Peer],
+    ) -> Result<()> {
         let mut client = self.manager.connect(peer).await?;
         client
             .shuffle(crate::proto::ShuffleRequest {
-                source: Some(self.me.clone()),
+                source: Some(source.clone()),
                 id: gen_msg_id(),
                 peers: peers.to_vec(),
                 ttl,
@@ -302,24 +328,27 @@ impl<C: ConnectionManager> HyParView<C> {
                 self.metrics.decr_pending();
                 self.pending_msgs.fetch_sub(1, atomic::Ordering::SeqCst);
                 let (res, dest) = match msg {
-                    OutgoingMessage::ForwardJoin(src, dest, ttl) => {
+                    OutgoingMessage::ForwardJoin { src, dest, ttl } => {
                         (self.send_forward_join(src, dest, *ttl).await, dest)
                     }
-                    OutgoingMessage::Disconnect(dest) => {
+                    OutgoingMessage::Disconnect { dest } => {
                         self.send_disconnect(dest).await;
                         (Ok(()), dest)
                     }
-                    OutgoingMessage::Neighbor(dest, priority) => {
-                        let resp = self.send_neighbor(dest, *priority).await.map(|_| ());
+                    OutgoingMessage::Neighbor { dest, prio } => {
+                        let resp = self.send_neighbor(dest, *prio).await.map(|_| ());
                         (resp, dest)
                     }
-                    OutgoingMessage::Shuffle(dest, peers, ttl) => {
-                        (self.send_shuffle(dest, *ttl, peers).await, dest)
-                    }
-                    OutgoingMessage::ShuffleReply(dest, peers) => {
+                    OutgoingMessage::Shuffle {
+                        src,
+                        dest,
+                        peers,
+                        ttl,
+                    } => (self.send_shuffle(src, dest, *ttl, peers).await, dest),
+                    OutgoingMessage::ShuffleReply { dest, peers } => {
                         (self.send_shuffle_reply(dest, peers).await, dest)
                     }
-                    OutgoingMessage::Data(dest, data) => (self.send_data(dest, data).await, dest),
+                    OutgoingMessage::Data { dest, req } => (self.send_data(dest, req).await, dest),
                 };
                 if let Err(e) = res {
                     warn!(
@@ -440,11 +469,12 @@ impl<C: ConnectionManager> HyParView<C> {
                         "[{}] sending shuffle request to {} with peers: {:?}",
                         self.me, destination, selected_peers
                     );
-                    self.enqueue_message(OutgoingMessage::Shuffle(
-                        destination,
-                        selected_peers,
-                        self.params.passive_rwl(),
-                    ));
+                    self.enqueue_message(OutgoingMessage::Shuffle {
+                        src: self.me.clone(),
+                        dest: destination,
+                        peers: selected_peers,
+                        ttl: self.params.passive_rwl(),
+                    });
                 } else {
                     debug!("[{}] shuffle aborted, no peers to send", self.me)
                 }
@@ -477,7 +507,7 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
         }
         let mut state = self.state.lock().unwrap();
         if let Some(dropped) = state.add_to_active_view(source) {
-            self.enqueue_message(OutgoingMessage::Disconnect(dropped));
+            self.enqueue_message(OutgoingMessage::Disconnect { dest: dropped });
         }
         let active_peers = state.active_view.clone();
         debug!(
@@ -486,11 +516,11 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
         );
         for peer in active_peers.into_iter().filter(|p| p != source) {
             debug_assert!(peer != self.me, "active set should never contain self");
-            self.enqueue_message(OutgoingMessage::ForwardJoin(
-                source.clone(),
-                peer,
-                self.params.active_rwl(),
-            ));
+            self.enqueue_message(OutgoingMessage::ForwardJoin {
+                src: source.clone(),
+                dest: peer,
+                ttl: self.params.active_rwl(),
+            });
         }
         Ok(Response::new(Empty {}))
     }
@@ -521,12 +551,12 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
             // some more. The partisan source had this as a LowPriority NEIGHBOR
             // message, but if we want to ensure the symmetry invariant this
             // has to be HighPriority.
-            self.enqueue_message(OutgoingMessage::Neighbor(
-                source.clone(),
-                NeighborPriority::High,
-            ));
+            self.enqueue_message(OutgoingMessage::Neighbor {
+                dest: source.clone(),
+                prio: NeighborPriority::High,
+            });
             if let Some(dropped_peer) = state.add_to_active_view(source) {
-                self.enqueue_message(OutgoingMessage::Disconnect(dropped_peer));
+                self.enqueue_message(OutgoingMessage::Disconnect { dest: dropped_peer });
             };
         } else {
             if req_ref.ttl == self.params.passive_rwl() {
@@ -537,11 +567,11 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
                     "[{}] recieved forward_join from {}, forwarding to {}",
                     self.me, source, n
                 );
-                self.enqueue_message(OutgoingMessage::ForwardJoin(
-                    source.clone(),
-                    n,
-                    req_ref.ttl - 1,
-                ));
+                self.enqueue_message(OutgoingMessage::ForwardJoin {
+                    src: source.clone(),
+                    dest: n,
+                    ttl: req_ref.ttl - 1,
+                });
             }
         }
         Ok(Response::new(Empty {}))
@@ -585,7 +615,7 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
                     self.me, source
                 );
                 if let Some(dropped_peer) = state.add_to_active_view(source) {
-                    self.enqueue_message(OutgoingMessage::Disconnect(dropped_peer));
+                    self.enqueue_message(OutgoingMessage::Disconnect { dest: dropped_peer });
                 }
                 Ok(Response::new(crate::proto::NeighborResponse {
                     accepted: true,
@@ -629,10 +659,10 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
             // I assume that on Shuffle termination we want to send back peers
             // from our passive view **before** we integrate the peers we just
             // received.
-            self.enqueue_message(OutgoingMessage::ShuffleReply(
-                source.clone(),
-                state.random_passive_peers(None, req_ref.peers.len()),
-            ));
+            self.enqueue_message(OutgoingMessage::ShuffleReply {
+                dest: source.clone(),
+                peers: state.random_passive_peers(None, req_ref.peers.len()),
+            });
             for peer in req_ref.peers.iter() {
                 state.add_to_passive_view(peer);
             }
@@ -641,11 +671,12 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
                 "[{}] recieved shuffle from {} with ttl {}, forwarding to {}",
                 self.me, req_ref.ttl, source, n
             );
-            self.enqueue_message(OutgoingMessage::Shuffle(
-                source.clone(),
-                req_ref.peers.clone(),
-                req_ref.ttl - 1,
-            ));
+            self.enqueue_message(OutgoingMessage::Shuffle {
+                src: source.clone(),
+                dest: n,
+                peers: req_ref.peers.clone(),
+                ttl: req_ref.ttl - 1,
+            });
         }
         Ok(Response::new(Empty {}))
     }
@@ -712,7 +743,10 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
             if peer == *source {
                 continue;
             }
-            self.enqueue_message(OutgoingMessage::Data(peer, cloned_data));
+            self.enqueue_message(OutgoingMessage::Data {
+                dest: peer,
+                req: cloned_data,
+            });
         }
 
         Ok(Response::new(Empty {}))

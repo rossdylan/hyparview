@@ -19,6 +19,7 @@ tokio-stream = "0.1.8"
 tonic = "0.7"
 tower = "0.4"
 tracing = "0.1"
+trust-dns-resolver = "0.21"
 
 [dev-dependencies]
 tracing-subscriber = "0.3"

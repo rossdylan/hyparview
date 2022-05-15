@@ -27,6 +27,8 @@ const SHUFFLE_ACTIVE: usize = 3;
 
 const SHUFFLE_PASSIVE: usize = 4;
 
+const DEFAULT_QUEUE_SIZE: usize = 2048;
+
 /// Constants used to derive active and passive view sizes
 #[derive(Clone, Copy, Debug)]
 pub struct NetworkParameters {
@@ -53,6 +55,9 @@ pub struct NetworkParameters {
 
     /// number of nodes from the active-view included in a shuffle
     ka: usize,
+
+    /// The size of our outgoing messages queue
+    outgoing_queue_size: usize,
 }
 
 impl NetworkParameters {
@@ -81,6 +86,11 @@ impl NetworkParameters {
         self.msg_history
     }
 
+    /// How big of a buffer our outgoing queue has
+    pub fn queue_size(&self) -> usize {
+        self.outgoing_queue_size
+    }
+
     /// Helper function to build a NetworkParameters struct with the given size
     /// but keeping the default scaling factors.
     pub fn default_with_size(size: f64) -> Self {
@@ -93,6 +103,7 @@ impl NetworkParameters {
             msg_history: MESSAGE_HISTORY,
             kp: SHUFFLE_PASSIVE,
             ka: SHUFFLE_ACTIVE,
+            outgoing_queue_size: DEFAULT_QUEUE_SIZE,
         }
     }
 }
@@ -103,16 +114,7 @@ impl Default for NetworkParameters {
     /// TODO(rossdylan): Attempt to find actual implementations of HyParView to
     /// pull real params from
     fn default() -> Self {
-        NetworkParameters {
-            size: 10_000.0,
-            c: ACTIVE_SCALE_FACTOR,
-            k: PASSIVE_SCALE_FACTOR,
-            arwl: ACTIVE_RANDOM_WALK_LENGTH,
-            prwl: PASSIVE_RANDOM_WALK_LENGTH,
-            msg_history: MESSAGE_HISTORY,
-            kp: SHUFFLE_PASSIVE,
-            ka: SHUFFLE_ACTIVE,
-        }
+        Self::default_with_size(10_000.0)
     }
 }
 

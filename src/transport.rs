@@ -260,3 +260,46 @@ where
         Ok(res)
     }
 }
+
+/// A [`BootstrapSource`] implementation that uses [`trust-dns-resolver`] to
+/// find instances of hyparview via dns lookups. It is expected that users of
+/// this bootstrapper know the port their systems are listening on and only
+/// want to resolve addresses.
+#[allow(missing_debug_implementations)]
+pub struct DNSBootstrapSource {
+    domain: String,
+    port: u16,
+    resolved: Option<trust_dns_resolver::lookup_ip::LookupIpIntoIter>,
+}
+
+impl DNSBootstrapSource {
+    /// Create a new bootstrap source that resolves hyparview instances via
+    /// DNS.
+    pub fn new(domain: &str, port: u16) -> Self {
+        Self {
+            domain: domain.into(),
+            port,
+            resolved: None,
+        }
+    }
+}
+
+impl BootstrapSource for DNSBootstrapSource {
+    fn next_peer(&mut self) -> Result<Option<Peer>> {
+        if self.resolved.is_none() {
+            // TODO(rossdylan): Propagate errors correctly here
+            let resolver = trust_dns_resolver::Resolver::from_system_conf().unwrap();
+            let result = resolver.lookup_ip(&self.domain).unwrap();
+            self.resolved.replace(result.into_iter());
+        }
+        let item = self
+            .resolved
+            .as_mut()
+            .and_then(|li| li.next())
+            .map(|r| Peer {
+                host: r.to_string(),
+                port: self.port as u32,
+            });
+        Ok(item)
+    }
+}
