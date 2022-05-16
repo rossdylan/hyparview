@@ -144,6 +144,7 @@ impl<C: ConnectionManager> HyParView<C> {
         // TODO(rossdylan): Consider extending enqueue_message with an optional
         // oneshot channel to act as a callback
         let mut sent = false;
+        let broadcast_start_time = std::time::Instant::now();
         {
             let mut fset = FuturesOrdered::new();
             for peer in peers.iter() {
@@ -161,6 +162,8 @@ impl<C: ConnectionManager> HyParView<C> {
                 }
             }
         }
+        self.metrics
+            .report_broadcast(sent, broadcast_start_time.elapsed());
         if sent {
             Ok(())
         } else {

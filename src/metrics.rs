@@ -1,5 +1,10 @@
 //! Internal metrics definitions for hyparview
-use metrics::{describe_counter, describe_gauge, register_counter, register_gauge, Counter, Gauge};
+use std::time::Duration;
+
+use metrics::{
+    describe_counter, describe_gauge, describe_histogram, register_counter, register_gauge,
+    register_histogram, Counter, Gauge, Histogram,
+};
 
 #[derive(Clone)]
 pub struct StateMetrics {
@@ -46,6 +51,9 @@ pub struct ServerMetrics {
     peer_failures: Counter,
     peer_replacement_success: Counter,
     peer_replacement_failure: Counter,
+    broadcast_failure: Counter,
+    broadcast_success: Counter,
+    broadcast_latency_ms: Histogram,
 }
 
 impl ServerMetrics {
@@ -63,6 +71,15 @@ impl ServerMetrics {
             "hyparview_peer_replacements",
             "status of peer replacement operations"
         );
+        describe_counter!(
+            "hyparview_broadcast_status",
+            "status of local broadcast requests"
+        );
+        describe_histogram!(
+            "hyparview_broadcast_latency_ms",
+            metrics::Unit::Milliseconds,
+            "latency in milliseconds of local broadcast operations"
+        );
         Self {
             pending_messages: register_gauge!("hyparview_pending_messages"),
             forwarded_data_messages: register_counter!("hyparview_data_messages", "status" => "forwarded"),
@@ -70,6 +87,18 @@ impl ServerMetrics {
             peer_failures: register_counter!("hyparview_peer_failures"),
             peer_replacement_success: register_counter!("hyparview_peer_replacements", "status" => "success"),
             peer_replacement_failure: register_counter!("hyparview_peer_replacements", "status" => "failure"),
+            broadcast_failure: register_counter!("hyparview_broadcast_status", "status" => "failure"),
+            broadcast_success: register_counter!("hyparview_broadcast_status", "status" => "success"),
+            broadcast_latency_ms: register_histogram!("hyparview_broadcast_latency_ms"),
+        }
+    }
+
+    pub fn report_broadcast(&self, success: bool, latency: Duration) {
+        self.broadcast_latency_ms.record(latency.as_millis() as f64);
+        if success {
+            self.broadcast_success.increment(1)
+        } else {
+            self.broadcast_failure.increment(1)
         }
     }
 

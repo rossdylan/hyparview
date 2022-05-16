@@ -171,6 +171,7 @@ impl State {
                 .take(self.params.ka)
                 .cloned(),
         );
+        let len = self.passive_view.len();
         nodes.extend(
             std::iter::repeat_with(|| rand::thread_rng().gen_range(0..len))
                 .take(len) // Do we need this? I want to make sure we don't iter forever
