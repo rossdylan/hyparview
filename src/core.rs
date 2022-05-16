@@ -489,6 +489,11 @@ impl<C: ConnectionManager> HyParView<C> {
             };
         }
     }
+
+    /// Return a tonic service wrapper that can be registered with a server
+    pub fn get_service(&self) -> crate::proto::hyparview_server::HyparviewServer<Self> {
+        crate::proto::hyparview_server::HyparviewServer::new(self.clone())
+    }
 }
 
 #[async_trait::async_trait]
