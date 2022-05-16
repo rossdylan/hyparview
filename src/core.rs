@@ -305,6 +305,7 @@ impl<C: ConnectionManager> HyParView<C> {
     /// Send the peer that had a failure over to our async failure handler
     /// task.
     fn report_failure(&self, peer: &Peer) {
+        self.metrics.report_peer_failure();
         self.failure_tx.send(peer.clone()).unwrap();
     }
 
@@ -435,10 +436,13 @@ impl<C: ConnectionManager> HyParView<C> {
                     self.me, failed_peer
                 );
                 if let Err(e) = self.replace_peer(&failed_peer).await {
+                    self.metrics.report_peer_replacement(false);
                     warn!(
                         "[{}] unable to replace {}, no healthy peers in passive view: {}",
                         self.me, failed_peer, e
                     );
+                } else {
+                    self.metrics.report_peer_replacement(true);
                 }
             } else {
                 return;
@@ -723,8 +727,10 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
         let mut state = self.state.lock().unwrap();
         // If we've seen this message before ignore it
         if state.message_seen(ksuid.bytes()) {
+            self.metrics.report_data_msg(true);
             return Ok(Response::new(Empty {}));
         }
+        self.metrics.report_data_msg(false);
         state.record_message(ksuid.bytes());
 
         // Only send this message to our local inprocess subscribers if we

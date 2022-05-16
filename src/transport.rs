@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use crate::error::{Error, Result};
 use crate::proto::hyparview_client::HyparviewClient;
@@ -61,7 +62,7 @@ impl ConnectionManager for DefaultConnectionManager {
             return Ok(client.clone());
         }
         let ep = Endpoint::from_shared(format!("http://{}:{}", peer.host, peer.port))?;
-        let channel = ep.connect().await?;
+        let channel = ep.timeout(Duration::from_secs(1)).connect().await?;
         let client = HyparviewClient::new(channel);
         self.connections
             .lock()
@@ -176,6 +177,7 @@ impl ConnectionManager for InMemoryConnectionManager {
             let client = self.graph.connect(peer).await?;
             let mut some_client = Some(client);
             let channel = Endpoint::try_from(format!("http://[::]:{}", peer.port))?
+                .timeout(Duration::from_secs(1))
                 .connect_with_connector(service_fn(move |_: Uri| {
                     let client = some_client.take();
                     async move {

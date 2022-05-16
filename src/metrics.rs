@@ -36,7 +36,16 @@ impl std::fmt::Debug for StateMetrics {
 
 #[derive(Clone)]
 pub struct ServerMetrics {
+    /// How many outgoing messages are in our queue
     pending_messages: Gauge,
+    /// Counter for data messages we've forwarded to other peers
+    forwarded_data_messages: Counter,
+    /// Counter for data messages we've ignored because we've already seen them
+    ignored_data_messages: Counter,
+    /// Counter tracking peer failures
+    peer_failures: Counter,
+    peer_replacement_success: Counter,
+    peer_replacement_failure: Counter,
 }
 
 impl ServerMetrics {
@@ -45,10 +54,45 @@ impl ServerMetrics {
             "hyparview_pending_messages",
             "how many messages are in our outgoing messages queue"
         );
+        describe_counter!(
+            "hyparview_data_messages",
+            "count of data messages that have been forwarded"
+        );
+        describe_counter!("hyparview_peer_failures", "count of peer failures");
+        describe_counter!(
+            "hyparview_peer_replacements",
+            "status of peer replacement operations"
+        );
         Self {
             pending_messages: register_gauge!("hyparview_pending_messages"),
+            forwarded_data_messages: register_counter!("hyparview_data_messages", "status" => "forwarded"),
+            ignored_data_messages: register_counter!("hyparview_data_messages", "status" => "ignored"),
+            peer_failures: register_counter!("hyparview_peer_failures"),
+            peer_replacement_success: register_counter!("hyparview_peer_replacements", "status" => "success"),
+            peer_replacement_failure: register_counter!("hyparview_peer_replacements", "status" => "failure"),
         }
     }
+
+    pub fn report_peer_replacement(&self, success: bool) {
+        if success {
+            self.peer_replacement_success.increment(1)
+        } else {
+            self.peer_replacement_failure.increment(1)
+        }
+    }
+
+    pub fn report_peer_failure(&self) {
+        self.peer_failures.increment(1)
+    }
+
+    pub fn report_data_msg(&self, ignored: bool) {
+        if ignored {
+            self.ignored_data_messages.increment(1)
+        } else {
+            self.forwarded_data_messages.increment(1)
+        }
+    }
+
     pub fn incr_pending(&self) {
         self.pending_messages.increment(1.0);
     }
