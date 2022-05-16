@@ -54,6 +54,7 @@ pub struct ServerMetrics {
     broadcast_failure: Counter,
     broadcast_success: Counter,
     broadcast_latency_ms: Histogram,
+    shuffle_triggered: Counter,
 }
 
 impl ServerMetrics {
@@ -80,6 +81,10 @@ impl ServerMetrics {
             metrics::Unit::Milliseconds,
             "latency in milliseconds of local broadcast operations"
         );
+        describe_counter!(
+            "hyparview_shuffle_triggered",
+            "how often shuffles are triggered"
+        );
         Self {
             pending_messages: register_gauge!("hyparview_pending_messages"),
             forwarded_data_messages: register_counter!("hyparview_data_messages", "status" => "forwarded"),
@@ -90,7 +95,13 @@ impl ServerMetrics {
             broadcast_failure: register_counter!("hyparview_broadcast_status", "status" => "failure"),
             broadcast_success: register_counter!("hyparview_broadcast_status", "status" => "success"),
             broadcast_latency_ms: register_histogram!("hyparview_broadcast_latency_ms"),
+            // TODO(rossdylan): Add status and histograms for shuffles
+            shuffle_triggered: register_counter!("hyparview_shuffle_triggered"),
         }
+    }
+
+    pub fn report_shuffle(&self) {
+        self.shuffle_triggered.increment(1)
     }
 
     pub fn report_broadcast(&self, success: bool, latency: Duration) {

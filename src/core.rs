@@ -461,6 +461,7 @@ impl<C: ConnectionManager> HyParView<C> {
             // periodic shuffle, but idk what the paper expects here. This should
             // be a configuration value in `NetworkParameters`
             tokio::time::sleep(crate::util::jitter(Duration::from_secs(60))).await;
+            self.metrics.report_shuffle();
             {
                 let state = self.state.lock().unwrap();
                 let destination = match state.random_active_peer(None) {
