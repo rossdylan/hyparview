@@ -457,10 +457,10 @@ impl<C: ConnectionManager> HyParView<C> {
     /// request into the network to update our passive views.
     async fn shuffle_task(self) {
         loop {
-            // TODO(rossdylan): I've randomly chosen 60s as the basis for our
+            // TODO(rossdylan): I've randomly chosen 300s as the basis for our
             // periodic shuffle, but idk what the paper expects here. This should
             // be a configuration value in `NetworkParameters`
-            tokio::time::sleep(crate::util::jitter(Duration::from_secs(60))).await;
+            tokio::time::sleep(crate::util::jitter(Duration::from_secs(300))).await;
             self.metrics.report_shuffle();
             {
                 let state = self.state.lock().unwrap();
