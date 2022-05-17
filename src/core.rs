@@ -4,6 +4,7 @@ use std::sync::atomic;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
+use std::time::Instant;
 
 use futures::stream::FuturesOrdered;
 use futures::StreamExt;
@@ -166,6 +167,8 @@ impl<C: ConnectionManager> HyParView<C> {
             .report_broadcast(sent, broadcast_start_time.elapsed());
         if sent {
             Ok(())
+        } else if self.state.lock().unwrap().netsplit {
+            Err(Error::FatalNetsplit)
         } else {
             Err(Error::BroadcastFailed)
         }
@@ -302,6 +305,7 @@ impl<C: ConnectionManager> HyParView<C> {
                 break;
             }
         }
+        self.state.lock().unwrap().set_netsplit(false);
         Ok(())
     }
 
@@ -377,7 +381,7 @@ impl<C: ConnectionManager> HyParView<C> {
     ///    peer in the active view
     /// 5. If the Neighbor request failed try again with a different passive
     ///    view peer.
-    async fn replace_peer(&self, failed: &Peer) -> Result<()> {
+    async fn replace_peer(&self, failed: &Peer) -> Result<bool> {
         let mut attempts = 0;
         loop {
             let (maybe_peer, prio) = {
@@ -385,7 +389,7 @@ impl<C: ConnectionManager> HyParView<C> {
                 // ensure that if a failed peer is reported multiple times we
                 // only execute replacement for it once
                 if !state.active_view.contains(failed) {
-                    return Ok(());
+                    return Ok(false);
                 }
                 // if the failed peer is the only peer in the active view the
                 // resulting replacement Neighbor request should be High
@@ -408,7 +412,7 @@ impl<C: ConnectionManager> HyParView<C> {
                     if accepted {
                         self.state.lock().unwrap().replace_peer(failed, &peer);
                         debug!("[{}] replacing {} with {}", self.me, failed, peer);
-                        return Ok(());
+                        return Ok(true);
                     } else {
                         debug!(
                             "[{}] failed to replace {} with {}, peer rejected neighbor request",
@@ -432,20 +436,47 @@ impl<C: ConnectionManager> HyParView<C> {
     /// Handle failures in the background by listening on a channel and running
     /// the failure algorithm.
     async fn failure_handler(self, mut rx: UnboundedReceiver<Peer>) {
+        let mut failed_peers: IndexSet<Peer> = IndexSet::new();
+        let mut last_reinit: Option<Instant> = None;
+        let reinit_rate = crate::util::jitter(Duration::from_secs(15));
         loop {
             if let Some(failed_peer) = rx.recv().await {
                 warn!(
                     "[{}] peer {} has been marked as failed",
                     self.me, failed_peer
                 );
-                if let Err(e) = self.replace_peer(&failed_peer).await {
-                    self.metrics.report_peer_replacement(false);
-                    warn!(
-                        "[{}] unable to replace {}, no healthy peers in passive view: {}",
-                        self.me, failed_peer, e
-                    );
-                } else {
-                    self.metrics.report_peer_replacement(true);
+                failed_peers.insert(failed_peer.clone());
+                match self.replace_peer(&failed_peer).await {
+                    // we just replaced this peer
+                    Ok(true) => {
+                        failed_peers.remove(&failed_peer);
+                        self.metrics.report_peer_replacement(true);
+                    }
+                    // we already replaced this peer, so don't double count
+                    Ok(false) => {
+                        failed_peers.remove(&failed_peer);
+                    }
+                    Err(e) => {
+                        self.metrics.report_peer_replacement(false);
+                        warn!(
+                            "[{}] unable to replace {}, no healthy peers in passive view: {}",
+                            self.me, failed_peer, e
+                        );
+                    }
+                }
+
+                // Check to see if we've lost all active peers, and have no
+                // passive peers. This indicates that we've had a catastrophic
+                // failure and need to re-initialize outselves
+                if last_reinit.is_none() || last_reinit.unwrap().elapsed() >= reinit_rate {
+                    let mut state = self.state.lock().unwrap();
+                    if failed_peers == state.active_view && state.passive_view.is_empty() {
+                        error!("[{}] netsplit detected, purging active-view", self.me);
+                        state.active_view.clear();
+                        failed_peers.clear();
+                        last_reinit = Some(Instant::now());
+                        state.set_netsplit(true);
+                    }
                 }
             } else {
                 return;

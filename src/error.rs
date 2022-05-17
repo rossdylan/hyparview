@@ -41,6 +41,9 @@ pub enum Error {
     /// An Error from the trust-dns-resolver system
     #[error("dns error")]
     DNSError(#[from] trust_dns_resolver::error::ResolveError),
+    /// A fatal netsplit occurred and a reinitialization is required
+    #[error("fatal netsplit occured")]
+    FatalNetsplit,
     /// An unknown error, used as a catch-all
     #[error("unknown error in mocks")]
     Unknown,

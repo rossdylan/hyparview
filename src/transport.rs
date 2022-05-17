@@ -9,6 +9,7 @@ use crate::error::{Error, Result};
 use crate::proto::hyparview_client::HyparviewClient;
 use crate::proto::Peer;
 
+use dyn_clone::DynClone;
 use lru::LruCache;
 use tokio::io::DuplexStream;
 use tokio::sync::mpsc;
@@ -208,44 +209,14 @@ impl ConnectionManager for InMemoryConnectionManager {
 /// BoostrapSource is used to generate the initial node to try and join to.
 /// If we run out of bootstrap nodes an error should be returned
 #[async_trait::async_trait]
-pub trait BootstrapSource {
+pub trait BootstrapSource: DynClone + Send + Sync {
     /// Retreive the next possible bootstrap node data from a BootstrapSource
     async fn next_peer(&mut self) -> Result<Option<Peer>>;
-
-    /// subset returns a set of nodes up to the given subset size. It will
-    /// tolerate up to `max_failures` before returning
-    /// TODO(rossdylan): This is ugly and strongly imperative, try and fix
-    async fn subset(&mut self, max_subset: usize, max_failures: usize) -> Result<Vec<Peer>> {
-        let mut failures: usize = 0;
-        let mut peers = Vec::with_capacity(max_subset);
-        while peers.len() < max_subset {
-            match self.next_peer().await {
-                Err(e) => {
-                    failures += 1;
-                    if failures >= max_failures && peers.is_empty() {
-                        return Err(e);
-                    } else {
-                        return Ok(peers);
-                    }
-                }
-                Ok(on) => {
-                    if let Some(n) = on {
-                        peers.push(n)
-                    } else {
-                        if !peers.is_empty() {
-                            return Ok(peers);
-                        }
-                        return Err(Error::NoBootstrapAddrsFound);
-                    }
-                }
-            }
-        }
-        Ok(peers)
-    }
 }
+dyn_clone::clone_trait_object!(BootstrapSource);
 
 #[async_trait::async_trait]
-impl<S: std::net::ToSocketAddrs + Send> BootstrapSource for S {
+impl<S: std::net::ToSocketAddrs + Send + Sync + Clone> BootstrapSource for S {
     async fn next_peer(&mut self) -> Result<Option<Peer>> {
         let mut addrs = self.to_socket_addrs()?;
         Ok(addrs.next().map(Into::into))
@@ -272,6 +243,15 @@ impl DNSBootstrapSource {
             port,
             resolved: None,
         }
+    }
+}
+
+/// yolo to the max, we can't clone the underlying iter of a bootstrap source
+/// so we just reinitialize with the base parameters so we can hold a copy for
+/// reinitialize purposes
+impl Clone for DNSBootstrapSource {
+    fn clone(&self) -> Self {
+        Self::new(&self.domain, self.port)
     }
 }
 

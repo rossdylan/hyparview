@@ -133,6 +133,10 @@ pub(crate) struct State {
     // filter here to increase space efficiency.
     messages: MessageStore,
     metrics: crate::metrics::StateMetrics,
+    /// Has our failure handling logic detected that this instance has completely
+    /// netsplit from all peers? This is used to force the application using
+    /// hyparview to reinit or crash
+    pub(crate) netsplit: bool,
 }
 
 /// Given an `IndexSet<Peer>` representing a hyparview view we extract a random
@@ -155,7 +159,12 @@ impl State {
             passive_view: IndexSet::with_capacity(psize),
             messages: MessageStore::new(params.message_history()),
             metrics: crate::metrics::StateMetrics::new(),
+            netsplit: false,
         }
+    }
+
+    pub(crate) fn set_netsplit(&mut self, n: bool) {
+        self.netsplit = n;
     }
 
     /// Select Kp nodes from the passive-view and Ka nodes from the active-view
