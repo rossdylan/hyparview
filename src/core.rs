@@ -427,6 +427,19 @@ impl<C: ConnectionManager> HyParView<C> {
                     self.state.lock().unwrap().passive_view.remove(&peer);
                 }
             } else {
+                let mut state = self.state.lock().unwrap();
+                // In the case of failures where we still have peers in our
+                // active view, but no passive peers to replace them with we
+                // can remove the failed peer to ensure nothing tries to talk to
+                // it
+                if state.active_view.len() > 1 {
+                    debug!(
+                        "[{}] removing failed peer {} without replacement",
+                        self.me, failed,
+                    );
+                    state.active_view.remove(failed);
+                    return Ok(false);
+                }
                 return Err(Error::PassiveViewEmpty);
             }
             attempts += 1;
@@ -447,14 +460,12 @@ impl<C: ConnectionManager> HyParView<C> {
                 );
                 failed_peers.insert(failed_peer.clone());
                 match self.replace_peer(&failed_peer).await {
-                    // we just replaced this peer
-                    Ok(true) => {
+                    Ok(replaced) => {
                         failed_peers.remove(&failed_peer);
-                        self.metrics.report_peer_replacement(true);
-                    }
-                    // we already replaced this peer, so don't double count
-                    Ok(false) => {
-                        failed_peers.remove(&failed_peer);
+                        let _ = self.manager.disconnect(&failed_peer).await;
+                        if replaced {
+                            self.metrics.report_peer_replacement(true);
+                        }
                     }
                     Err(e) => {
                         self.metrics.report_peer_replacement(false);
