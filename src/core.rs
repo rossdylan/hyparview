@@ -682,7 +682,7 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
         } else if let Some(n) = state.random_active_peer(Some(source)) {
             debug!(
                 "[{}] recieved shuffle from {} with ttl {}, forwarding to {}",
-                self.me, req_ref.ttl, source, n
+                self.me, source, req_ref.ttl, n
             );
             self.enqueue_message(OutgoingMessage::Shuffle {
                 src: source.clone(),
