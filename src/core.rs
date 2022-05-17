@@ -488,10 +488,16 @@ impl<C: ConnectionManager> HyParView<C> {
     /// request into the network to update our passive views.
     async fn shuffle_task(self) {
         loop {
-            // TODO(rossdylan): I've randomly chosen 300s as the basis for our
+            // TODO(rossdylan): I've randomly chosen 60s as the basis for our
             // periodic shuffle, but idk what the paper expects here. This should
             // be a configuration value in `NetworkParameters`
-            tokio::time::sleep(crate::util::jitter(Duration::from_secs(300))).await;
+            // ---
+            // NOTE(rossdylan): For mass failures early in a networks life the
+            // shuffle process seems key to ensuring some kind of network recovery
+            // Experimentally, in a network that has lost half its nodes some
+            // instances will be stuck with an empty passive view until a shuffle
+            // kicks off and fills it up again
+            tokio::time::sleep(crate::util::jitter(Duration::from_secs(60))).await;
             self.metrics.report_shuffle();
             {
                 let state = self.state.lock().unwrap();
