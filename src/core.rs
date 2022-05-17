@@ -286,7 +286,7 @@ impl<C: ConnectionManager> HyParView<C> {
     /// init will only fail if we can't contact any peers from provided by
     /// the `BootstrapSource`
     pub async fn init(&mut self, mut boots: impl BootstrapSource) -> Result<()> {
-        while let Some(ref contact_peer) = boots.next_peer()? {
+        while let Some(ref contact_peer) = boots.next_peer().await? {
             self.state.lock().unwrap().add_to_active_view(contact_peer);
             if let Err(e) = self.send_join(contact_peer).await {
                 self.state.lock().unwrap().disconnect(contact_peer);
@@ -907,7 +907,7 @@ mod tests {
             let mut fset = FuturesUnordered::new();
             for (_, instance) in peer_to_inst.iter_mut() {
                 let bs_peer = peers[0].clone();
-                fset.push(instance.init(std::iter::once(bs_peer)));
+                fset.push(instance.init(bs_peer));
             }
             while let Some(res) = fset.next().await {
                 res?;
@@ -995,7 +995,7 @@ mod tests {
             let mut fset = FuturesUnordered::new();
             for (_, instance) in peer_to_inst.iter_mut() {
                 let bs_peer = peers[0].clone();
-                fset.push(instance.init(std::iter::once(bs_peer)));
+                fset.push(instance.init(bs_peer));
             }
             while let Some(res) = fset.next().await {
                 res?;

@@ -207,18 +207,19 @@ impl ConnectionManager for InMemoryConnectionManager {
 
 /// BoostrapSource is used to generate the initial node to try and join to.
 /// If we run out of bootstrap nodes an error should be returned
+#[async_trait::async_trait]
 pub trait BootstrapSource {
     /// Retreive the next possible bootstrap node data from a BootstrapSource
-    fn next_peer(&mut self) -> Result<Option<Peer>>;
+    async fn next_peer(&mut self) -> Result<Option<Peer>>;
 
     /// subset returns a set of nodes up to the given subset size. It will
     /// tolerate up to `max_failures` before returning
     /// TODO(rossdylan): This is ugly and strongly imperative, try and fix
-    fn subset(&mut self, max_subset: usize, max_failures: usize) -> Result<Vec<Peer>> {
+    async fn subset(&mut self, max_subset: usize, max_failures: usize) -> Result<Vec<Peer>> {
         let mut failures: usize = 0;
         let mut peers = Vec::with_capacity(max_subset);
         while peers.len() < max_subset {
-            match self.next_peer() {
+            match self.next_peer().await {
                 Err(e) => {
                     failures += 1;
                     if failures >= max_failures && peers.is_empty() {
@@ -243,23 +244,11 @@ pub trait BootstrapSource {
     }
 }
 
-/// Implement `BoostrapSource` for all iterators that iterate over something that
-/// can be converted into a `SocketAddr`. This lets us easily bootstrap using a
-/// vector of strings.
-impl<I, S> BootstrapSource for I
-where
-    I: Iterator<Item = S>,
-    S: std::net::ToSocketAddrs,
-{
-    fn next_peer(&mut self) -> Result<Option<Peer>> {
-        let res = match self.next() {
-            None => None,
-            Some(s) => {
-                let mut addrs = s.to_socket_addrs()?;
-                addrs.next().map(std::convert::From::from)
-            }
-        };
-        Ok(res)
+#[async_trait::async_trait]
+impl<S: std::net::ToSocketAddrs + Send> BootstrapSource for S {
+    async fn next_peer(&mut self) -> Result<Option<Peer>> {
+        let mut addrs = self.to_socket_addrs()?;
+        Ok(addrs.next().map(Into::into))
     }
 }
 
@@ -286,14 +275,14 @@ impl DNSBootstrapSource {
     }
 }
 
+#[async_trait::async_trait]
 impl BootstrapSource for DNSBootstrapSource {
-    fn next_peer(&mut self) -> Result<Option<Peer>> {
+    async fn next_peer(&mut self) -> Result<Option<Peer>> {
         if self.resolved.is_none() {
             // TODO(rossdylan): Propagate errors correctly here and maybe start up
             // a new temp runtime
-            let runtime = tokio::runtime::Handle::try_current().unwrap();
             let resolver = trust_dns_resolver::TokioAsyncResolver::tokio_from_system_conf()?;
-            let result = runtime.block_on(resolver.lookup_ip(&self.domain))?;
+            let result = resolver.lookup_ip(&self.domain).await?;
             self.resolved.replace(result.into_iter());
         }
         let item = self
