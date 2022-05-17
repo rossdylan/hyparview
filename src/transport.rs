@@ -289,9 +289,11 @@ impl DNSBootstrapSource {
 impl BootstrapSource for DNSBootstrapSource {
     fn next_peer(&mut self) -> Result<Option<Peer>> {
         if self.resolved.is_none() {
-            // TODO(rossdylan): Propagate errors correctly here
-            let resolver = trust_dns_resolver::Resolver::from_system_conf().unwrap();
-            let result = resolver.lookup_ip(&self.domain).unwrap();
+            // TODO(rossdylan): Propagate errors correctly here and maybe start up
+            // a new temp runtime
+            let runtime = tokio::runtime::Handle::try_current().unwrap();
+            let resolver = trust_dns_resolver::TokioAsyncResolver::tokio_from_system_conf()?;
+            let result = runtime.block_on(resolver.lookup_ip(&self.domain))?;
             self.resolved.replace(result.into_iter());
         }
         let item = self

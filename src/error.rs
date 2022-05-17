@@ -38,6 +38,9 @@ pub enum Error {
     /// We attempted to double register a peer's server instance
     #[error("a mock server has already been registered for this peer")]
     MockServerAlreadyRegistered,
+    /// An Error from the trust-dns-resolver system
+    #[error("dns error")]
+    DNSError(#[from] trust_dns_resolver::error::ResolveError),
     /// An unknown error, used as a catch-all
     #[error("unknown error in mocks")]
     Unknown,
