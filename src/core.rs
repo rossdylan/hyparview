@@ -674,7 +674,7 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
             // received.
             self.enqueue_message(OutgoingMessage::ShuffleReply {
                 dest: source.clone(),
-                peers: state.random_passive_peers(None, req_ref.peers.len()),
+                peers: state.random_passive_peers(Some(source), req_ref.peers.len()),
             });
             for peer in req_ref.peers.iter() {
                 state.add_to_passive_view(peer);
