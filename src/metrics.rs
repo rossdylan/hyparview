@@ -2,8 +2,8 @@
 use std::time::Duration;
 
 use metrics::{
-    describe_counter, describe_gauge, describe_histogram, register_counter, register_gauge,
-    register_histogram, Counter, Gauge, Histogram,
+    decrement_gauge, describe_counter, describe_gauge, describe_histogram, increment_gauge,
+    register_counter, register_gauge, register_histogram, Counter, Gauge, Histogram,
 };
 
 #[derive(Clone)]
@@ -41,8 +41,6 @@ impl std::fmt::Debug for StateMetrics {
 
 #[derive(Clone)]
 pub struct ServerMetrics {
-    /// How many outgoing messages are in our queue
-    pending_messages: Gauge,
     /// Counter for data messages we've forwarded to other peers
     forwarded_data_messages: Counter,
     /// Counter for data messages we've ignored because we've already seen them
@@ -98,7 +96,6 @@ impl ServerMetrics {
             "latency for a single iteration of the outgoing message loop"
         );
         Self {
-            pending_messages: register_gauge!("hyparview_pending_messages"),
             forwarded_data_messages: register_counter!("hyparview_data_messages", "status" => "forwarded"),
             ignored_data_messages: register_counter!("hyparview_data_messages", "status" => "ignored"),
             peer_failures: register_counter!("hyparview_peer_failures"),
@@ -156,11 +153,11 @@ impl ServerMetrics {
         }
     }
 
-    pub fn incr_pending(&self) {
-        self.pending_messages.increment(1.0);
+    pub fn incr_pending(&self, msg: &'static str) {
+        increment_gauge!("hyparview_pending_messages", 1.0, "type" => msg);
     }
-    pub fn decr_pending(&self) {
-        self.pending_messages.decrement(1.0)
+    pub fn decr_pending(&self, msg: &'static str) {
+        decrement_gauge!("hyparview_pending_messages", 1.0, "type" => msg);
     }
 }
 

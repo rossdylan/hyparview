@@ -58,14 +58,21 @@ enum OutgoingMessage {
 }
 
 impl OutgoingMessage {
-    pub fn name(&self) -> &str {
+    const FJ_NAME: &'static str = "ForwardJoin";
+    const DI_NAME: &'static str = "Disconnect";
+    const N_NAME: &'static str = "Neighbor";
+    const S_NAME: &'static str = "Shuffle";
+    const SR_NAME: &'static str = "ShuffleReply";
+    const DA_NAME: &'static str = "Data";
+
+    pub fn name(&self) -> &'static str {
         match self {
-            Self::ForwardJoin { .. } => "ForwardJoin",
-            Self::Disconnect { .. } => "Disconnect",
-            Self::Neighbor { .. } => "Neighbor",
-            Self::Shuffle { .. } => "Shuffle",
-            Self::ShuffleReply { .. } => "ShuffleReply",
-            Self::Data { .. } => "Data",
+            Self::ForwardJoin { .. } => Self::FJ_NAME,
+            Self::Disconnect { .. } => Self::DI_NAME,
+            Self::Neighbor { .. } => Self::N_NAME,
+            Self::Shuffle { .. } => Self::S_NAME,
+            Self::ShuffleReply { .. } => Self::SR_NAME,
+            Self::Data { .. } => Self::DA_NAME,
         }
     }
 }
@@ -332,7 +339,7 @@ impl<C: ConnectionManager> HyParView<C> {
     /// queue. It also increments our pending messages counter so we have an
     /// idea of what our backlog is like.
     fn enqueue_message(&self, msg: OutgoingMessage) {
-        self.metrics.incr_pending();
+        self.metrics.incr_pending(msg.name());
         self.pending_msgs.fetch_add(1, atomic::Ordering::SeqCst);
         self.outgoing_msgs.send(msg).unwrap();
     }
@@ -346,7 +353,7 @@ impl<C: ConnectionManager> HyParView<C> {
         loop {
             if let Some(ref msg) = rx.recv().await {
                 let start_time = Instant::now();
-                self.metrics.decr_pending();
+                self.metrics.decr_pending(msg.name());
                 self.pending_msgs.fetch_sub(1, atomic::Ordering::SeqCst);
 
                 // TODO(rossdylan): since outgoing task is expected to be 'static
@@ -472,8 +479,7 @@ impl<C: ConnectionManager> HyParView<C> {
     /// the failure algorithm.
     async fn failure_handler(self) {
         loop {
-            let failed = self.ftracker.wait().await;
-            for failed_peer in failed {
+            for failed_peer in self.ftracker.wait().await {
                 let start_time = Instant::now();
                 trace!(
                     "[{}] peer {} has been marked as failed",

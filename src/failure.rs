@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
+use tracing::debug;
 
 use crate::proto::Peer;
 
@@ -63,6 +64,7 @@ impl Tracker {
                 let mut state = bg_t.state.lock().unwrap();
                 if !state.failed.is_empty() {
                     state.trigger();
+                    debug!("ticker notifying failure handler");
                     bg_t.notifier.notify_waiters();
                 }
             }
