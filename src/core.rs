@@ -56,6 +56,19 @@ enum OutgoingMessage {
         req: DataRequest,
     },
 }
+
+impl OutgoingMessage {
+    pub fn name(&self) -> &str {
+        match self {
+            Self::ForwardJoin { .. } => "ForwardJoin",
+            Self::Disconnect { .. } => "Disconnect",
+            Self::Neighbor { .. } => "Neighbor",
+            Self::Shuffle { .. } => "Shuffle",
+            Self::ShuffleReply { .. } => "ShuffleReply",
+            Self::Data { .. } => "Data",
+        }
+    }
+}
 /// Implements the HyParView protocol over a generic transport layer. Messages
 /// from the transport layer are recieved over a channel. The protocol is driven
 /// by 3 threads.
@@ -69,7 +82,7 @@ pub struct HyParView<C: ConnectionManager + 'static> {
     me: Peer,
     params: NetworkParameters,
     manager: C,
-    failure_tx: UnboundedSender<Peer>,
+    ftracker: crate::failure::Tracker,
     outgoing_msgs: UnboundedSender<OutgoingMessage>,
     pending_msgs: Arc<atomic::AtomicU64>,
     state: Arc<Mutex<State>>,
@@ -101,14 +114,13 @@ impl<C: ConnectionManager> HyParView<C> {
             host: String::from(host),
             port: port as u32,
         };
-        let (failure_tx, failure_rx) = unbounded_channel();
         let (outgoing_tx, outgoing_rx) = unbounded_channel();
         let (broadcast_tx, _) = broadcast::channel(1024);
         let hpv = HyParView {
             me: me.clone(),
             params,
             manager,
-            failure_tx,
+            ftracker: crate::failure::Tracker::new(Duration::from_millis(500)),
             outgoing_msgs: outgoing_tx,
             pending_msgs: Arc::new(Default::default()),
             state: Arc::new(Mutex::new(State::new(me, params))),
@@ -119,7 +131,7 @@ impl<C: ConnectionManager> HyParView<C> {
         // stateful, but its kinda the only way I can make the channels work
         // the way I want.
         tokio::spawn(hpv.clone().outgoing_task(outgoing_rx));
-        tokio::spawn(hpv.clone().failure_handler(failure_rx));
+        tokio::spawn(hpv.clone().failure_handler());
         tokio::spawn(hpv.clone().shuffle_task());
         hpv
     }
@@ -313,7 +325,7 @@ impl<C: ConnectionManager> HyParView<C> {
     /// task.
     fn report_failure(&self, peer: &Peer) {
         self.metrics.report_peer_failure();
-        self.failure_tx.send(peer.clone()).unwrap();
+        self.ftracker.fail(peer);
     }
 
     /// Helper function which places an outgoing message into the outgoing
@@ -366,8 +378,11 @@ impl<C: ConnectionManager> HyParView<C> {
                 };
                 if let Err(e) = res {
                     warn!(
-                        "[{}] failed to send '{:?}' to {}: {}",
-                        self.me, msg, dest, e
+                        "[{}] failed to send '{}' to {}: {}",
+                        self.me,
+                        msg.name(),
+                        dest,
+                        e
                     );
                     self.report_failure(dest);
                 }
@@ -418,7 +433,7 @@ impl<C: ConnectionManager> HyParView<C> {
                 if let Ok(accepted) = self.send_neighbor(&peer, prio).await {
                     if accepted {
                         self.state.lock().unwrap().replace_peer(failed, &peer);
-                        debug!("[{}] replacing {} with {}", self.me, failed, peer);
+                        warn!("[{}] replacing {} with {}", self.me, failed, peer);
                         return Ok(true);
                     } else {
                         debug!(
@@ -427,7 +442,7 @@ impl<C: ConnectionManager> HyParView<C> {
                         )
                     }
                 } else {
-                    debug!(
+                    warn!(
                         "[{}] failed to replace {} with {}, removing from passive view",
                         self.me, failed, peer
                     );
@@ -455,21 +470,19 @@ impl<C: ConnectionManager> HyParView<C> {
 
     /// Handle failures in the background by listening on a channel and running
     /// the failure algorithm.
-    async fn failure_handler(self, mut rx: UnboundedReceiver<Peer>) {
-        let mut failed_peers: IndexSet<Peer> = IndexSet::new();
-        let mut last_reinit: Option<Instant> = None;
-        let reinit_rate = crate::util::jitter(Duration::from_secs(15));
+    async fn failure_handler(self) {
         loop {
-            if let Some(failed_peer) = rx.recv().await {
+            let failed = self.ftracker.wait().await;
+            for failed_peer in failed {
                 let start_time = Instant::now();
-                warn!(
+                trace!(
                     "[{}] peer {} has been marked as failed",
-                    self.me, failed_peer
+                    self.me,
+                    failed_peer
                 );
-                failed_peers.insert(failed_peer.clone());
                 match self.replace_peer(&failed_peer).await {
                     Ok(replaced) => {
-                        failed_peers.remove(&failed_peer);
+                        self.ftracker.remove(&failed_peer);
                         let _ = self.manager.disconnect(&failed_peer).await;
                         if replaced {
                             self.metrics.report_peer_replacement(true);
@@ -483,23 +496,7 @@ impl<C: ConnectionManager> HyParView<C> {
                         );
                     }
                 }
-
-                // Check to see if we've lost all active peers, and have no
-                // passive peers. This indicates that we've had a catastrophic
-                // failure and need to re-initialize outselves
-                if last_reinit.is_none() || last_reinit.unwrap().elapsed() >= reinit_rate {
-                    let mut state = self.state.lock().unwrap();
-                    if failed_peers == state.active_view && state.passive_view.is_empty() {
-                        error!("[{}] netsplit detected, purging active-view", self.me);
-                        state.active_view.clear();
-                        failed_peers.clear();
-                        last_reinit = Some(Instant::now());
-                        state.set_netsplit(true);
-                    }
-                }
                 self.metrics.report_failure_loop_time(start_time.elapsed());
-            } else {
-                return;
             }
         }
     }
@@ -1006,7 +1003,8 @@ mod tests {
             .unwrap();
         let msg = "foobar".as_bytes();
         peer_to_inst.get(&bpeer).unwrap().broadcast(msg).await?;
-
+        // wait for the next failure tick to occur
+        tokio::time::sleep(Duration::from_secs(1)).await;
         // Periodically check pending messages to wait for protocol convergence
         wait_for_convergence(&peer_to_inst).await;
 
