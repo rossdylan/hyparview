@@ -341,6 +341,7 @@ impl<C: ConnectionManager> HyParView<C> {
                     }
                     OutgoingMessage::Disconnect { dest } => {
                         self.send_disconnect(dest).await;
+                        let _ = self.manager.disconnect(dest).await;
                         (Ok(()), dest)
                     }
                     OutgoingMessage::Neighbor { dest, prio } => {
@@ -653,6 +654,7 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
             !self.active_view().contains(source),
             "active view contains peer after disconnect request"
         );
+        let _ = self.manager.disconnect(source).await;
         Ok(Response::new(Empty {}))
     }
 
