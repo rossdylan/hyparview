@@ -333,8 +333,10 @@ impl<C: ConnectionManager> HyParView<C> {
         trace!("[{}] outgoing task spawned", self.me);
         loop {
             if let Some(ref msg) = rx.recv().await {
+                let start_time = Instant::now();
                 self.metrics.decr_pending();
                 self.pending_msgs.fetch_sub(1, atomic::Ordering::SeqCst);
+
                 let (res, dest) = match msg {
                     OutgoingMessage::ForwardJoin { src, dest, ttl } => {
                         (self.send_forward_join(src, dest, *ttl).await, dest)
@@ -366,6 +368,7 @@ impl<C: ConnectionManager> HyParView<C> {
                     );
                     self.report_failure(dest);
                 }
+                self.metrics.report_outgoing_loop_time(start_time.elapsed());
             } else {
                 return;
             }
@@ -455,6 +458,7 @@ impl<C: ConnectionManager> HyParView<C> {
         let reinit_rate = crate::util::jitter(Duration::from_secs(15));
         loop {
             if let Some(failed_peer) = rx.recv().await {
+                let start_time = Instant::now();
                 warn!(
                     "[{}] peer {} has been marked as failed",
                     self.me, failed_peer
@@ -490,6 +494,7 @@ impl<C: ConnectionManager> HyParView<C> {
                         state.set_netsplit(true);
                     }
                 }
+                self.metrics.report_failure_loop_time(start_time.elapsed());
             } else {
                 return;
             }

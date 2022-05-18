@@ -55,6 +55,8 @@ pub struct ServerMetrics {
     broadcast_success: Counter,
     broadcast_latency_ms: Histogram,
     shuffle_triggered: Counter,
+    failure_process_time: Histogram,
+    outgoing_process_time: Histogram,
 }
 
 impl ServerMetrics {
@@ -85,6 +87,16 @@ impl ServerMetrics {
             "hyparview_shuffle_triggered",
             "how often shuffles are triggered"
         );
+        describe_histogram!(
+            "hyparview_failure_process_time_ms",
+            metrics::Unit::Milliseconds,
+            "latency for a single iteration of the failure handler loop"
+        );
+        describe_histogram!(
+            "hyparview_outgoing_process_time_ms",
+            metrics::Unit::Milliseconds,
+            "latency for a single iteration of the outgoing message loop"
+        );
         Self {
             pending_messages: register_gauge!("hyparview_pending_messages"),
             forwarded_data_messages: register_counter!("hyparview_data_messages", "status" => "forwarded"),
@@ -97,7 +109,18 @@ impl ServerMetrics {
             broadcast_latency_ms: register_histogram!("hyparview_broadcast_latency_ms"),
             // TODO(rossdylan): Add status and histograms for shuffles
             shuffle_triggered: register_counter!("hyparview_shuffle_triggered"),
+            failure_process_time: register_histogram!("hyparview_failure_process_time_ms"),
+            outgoing_process_time: register_histogram!("hyparview_outgoing_process_time_ms"),
         }
+    }
+
+    pub fn report_failure_loop_time(&self, latency: Duration) {
+        self.failure_process_time.record(latency.as_millis() as f64);
+    }
+
+    pub fn report_outgoing_loop_time(&self, latency: Duration) {
+        self.outgoing_process_time
+            .record(latency.as_millis() as f64);
     }
 
     pub fn report_shuffle(&self) {
