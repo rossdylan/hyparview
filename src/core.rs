@@ -337,6 +337,9 @@ impl<C: ConnectionManager> HyParView<C> {
                 self.metrics.decr_pending();
                 self.pending_msgs.fetch_sub(1, atomic::Ordering::SeqCst);
 
+                // TODO(rossdylan): since outgoing task is expected to be 'static
+                // can we spawn more tasks here to vastly increase the concurrency
+                // of this queue?
                 let (res, dest) = match msg {
                     OutgoingMessage::ForwardJoin { src, dest, ttl } => {
                         (self.send_forward_join(src, dest, *ttl).await, dest)
@@ -505,7 +508,7 @@ impl<C: ConnectionManager> HyParView<C> {
     /// request into the network to update our passive views.
     async fn shuffle_task(self) {
         loop {
-            // TODO(rossdylan): I've randomly chosen 60s as the basis for our
+            // TODO(rossdylan): I've randomly chosen 120s as the basis for our
             // periodic shuffle, but idk what the paper expects here. This should
             // be a configuration value in `NetworkParameters`
             // ---
@@ -514,7 +517,7 @@ impl<C: ConnectionManager> HyParView<C> {
             // Experimentally, in a network that has lost half its nodes some
             // instances will be stuck with an empty passive view until a shuffle
             // kicks off and fills it up again
-            tokio::time::sleep(crate::util::jitter(Duration::from_secs(60))).await;
+            tokio::time::sleep(crate::util::jitter(Duration::from_secs(120))).await;
             self.metrics.report_shuffle();
             {
                 let state = self.state.lock().unwrap();
