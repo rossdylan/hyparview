@@ -168,6 +168,9 @@ impl<C: ConnectionManager> HyParView<C> {
         {
             let mut fset = FuturesOrdered::new();
             for peer in peers.iter() {
+                if self.ftracker.is_failed(peer) {
+                    continue;
+                }
                 let req_fut = self.send_data(peer, &req);
                 fset.push(req_fut);
             }
@@ -816,7 +819,7 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
         let active_peers = state.active_view.clone();
         for peer in active_peers.into_iter() {
             let cloned_data = req_ref.clone();
-            if peer == *source {
+            if peer == *source || self.ftracker.is_failed(&peer) {
                 continue;
             }
             self.enqueue_message(OutgoingMessage::Data {

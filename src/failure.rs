@@ -1,7 +1,7 @@
 //! Structure used to efficiently track and notify the hyparview protocol of
 //! failures.
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Notify;
@@ -44,7 +44,7 @@ impl Default for TrackerState {
 #[derive(Clone, Debug)]
 pub struct Tracker {
     period: Duration,
-    state: Arc<Mutex<TrackerState>>,
+    state: Arc<RwLock<TrackerState>>,
     notifier: Arc<Notify>,
 }
 
@@ -61,7 +61,7 @@ impl Tracker {
             let mut ticker = tokio::time::interval(bg_t.period);
             loop {
                 ticker.tick().await;
-                let mut state = bg_t.state.lock().unwrap();
+                let mut state = bg_t.state.write().unwrap();
                 if !state.failed.is_empty() {
                     state.trigger();
                     debug!("ticker notifying failure handler");
@@ -72,8 +72,12 @@ impl Tracker {
         t
     }
 
+    pub fn is_failed(&self, p: &Peer) -> bool {
+        self.state.read().unwrap().failed.contains(p)
+    }
+
     pub fn fail(&self, p: &Peer) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.write().unwrap();
         state.failed.insert(p.clone());
         if state.since_trigger() >= self.period {
             state.trigger();
@@ -85,7 +89,7 @@ impl Tracker {
         let notifier = self.notifier.clone();
         loop {
             notifier.notified().await;
-            let state = self.state.lock().unwrap();
+            let state = self.state.read().unwrap();
             if !state.failed.is_empty() {
                 return state.failed.iter().cloned().collect();
             }
@@ -93,7 +97,7 @@ impl Tracker {
     }
 
     pub fn remove(&self, p: &Peer) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.write().unwrap();
         state.failed.remove(p);
     }
 }
