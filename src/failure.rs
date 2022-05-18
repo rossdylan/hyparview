@@ -64,7 +64,6 @@ impl Tracker {
                 let mut state = bg_t.state.write().unwrap();
                 if !state.failed.is_empty() {
                     state.trigger();
-                    debug!("ticker notifying failure handler");
                     bg_t.notifier.notify_waiters();
                 }
             }
