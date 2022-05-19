@@ -381,7 +381,7 @@ impl<C: ConnectionManager> HyParView<C> {
                 self.pending_msgs.fetch_sub(1, atomic::Ordering::SeqCst);
 
                 // Extract destination and check to make sure we are actually
-                // connected to it
+                // connected to it (unless it is a transient connection like ShuffleReply or Disconnect)
                 let dest = msg.dest();
                 let is_transient = matches!(
                     msg,
@@ -832,14 +832,17 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
             Ok(k) => k,
         };
 
-        let mut state = self.state.lock().unwrap();
-        // If we've seen this message before ignore it
-        if state.message_seen(ksuid.bytes()) {
-            self.metrics.report_data_msg(true);
-            return Ok(Response::new(Empty {}));
-        }
-        self.metrics.report_data_msg(false);
-        state.record_message(ksuid.bytes());
+        let active_peers = {
+            let mut state = self.state.lock().unwrap();
+            // If we've seen this message before ignore it
+            if state.message_seen(ksuid.bytes()) {
+                self.metrics.report_data_msg(true);
+                return Ok(Response::new(Empty {}));
+            }
+            self.metrics.report_data_msg(false);
+            state.record_message(ksuid.bytes());
+            state.active_view.clone()
+        };
 
         // Only send this message to our local inprocess subscribers if we
         // actually have inproccess subscribers
@@ -851,7 +854,6 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
                 );
             }
         }
-        let active_peers = state.active_view.clone();
         for peer in active_peers.into_iter() {
             let cloned_data = req_ref.clone();
             if peer == *source || self.ftracker.is_failed(&peer) {

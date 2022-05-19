@@ -120,7 +120,7 @@ impl Default for NetworkParameters {
 
 /// The State structure is used to track internal hyparview protocol state such
 /// as active and passive views, and initial network parameters.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct State {
     me: Peer,
     /// The initial parameters we set for executing the hyparview protocol
@@ -292,7 +292,7 @@ impl State {
     }
 
     /// Check to see if we have seen the given message ID before
-    pub(crate) fn message_seen(&self, mid: &[u8]) -> bool {
+    pub(crate) fn message_seen(&self, mid: &[u8; 20]) -> bool {
         self.messages.contains(mid)
     }
 }
