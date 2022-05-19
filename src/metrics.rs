@@ -2,8 +2,9 @@
 use std::time::Duration;
 
 use metrics::{
-    decrement_gauge, describe_counter, describe_gauge, describe_histogram, increment_gauge,
-    register_counter, register_gauge, register_histogram, Counter, Gauge, Histogram,
+    decrement_gauge, describe_counter, describe_gauge, describe_histogram, increment_counter,
+    increment_gauge, register_counter, register_gauge, register_histogram, Counter, Gauge,
+    Histogram,
 };
 
 #[derive(Clone)]
@@ -95,6 +96,10 @@ impl ServerMetrics {
             metrics::Unit::Milliseconds,
             "latency for a single iteration of the outgoing message loop"
         );
+        describe_counter!(
+            "hyparview_dropped_messages",
+            "rate of dropped messages due to overflow of the outgoing queue"
+        );
         Self {
             forwarded_data_messages: register_counter!("hyparview_data_messages", "status" => "forwarded"),
             ignored_data_messages: register_counter!("hyparview_data_messages", "status" => "ignored"),
@@ -151,6 +156,10 @@ impl ServerMetrics {
         } else {
             self.forwarded_data_messages.increment(1)
         }
+    }
+
+    pub fn report_msg_drop(&self, msg: &'static str) {
+        increment_counter!("hyparview_dropped_messages", "type" => msg);
     }
 
     pub fn incr_pending(&self, msg: &'static str) {

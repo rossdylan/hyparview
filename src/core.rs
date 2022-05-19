@@ -11,7 +11,7 @@ use futures::StreamExt;
 use indexmap::IndexSet;
 use svix_ksuid::KsuidLike;
 use tokio::sync::broadcast;
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, trace, warn};
 
@@ -90,7 +90,7 @@ pub struct HyParView<C: ConnectionManager + 'static> {
     params: NetworkParameters,
     manager: C,
     ftracker: crate::failure::Tracker,
-    outgoing_msgs: UnboundedSender<OutgoingMessage>,
+    outgoing_msgs: mpsc::Sender<OutgoingMessage>,
     pending_msgs: Arc<atomic::AtomicU64>,
     state: Arc<Mutex<State>>,
     broadcast_tx: Arc<broadcast::Sender<(svix_ksuid::Ksuid, Vec<u8>)>>,
@@ -121,7 +121,7 @@ impl<C: ConnectionManager> HyParView<C> {
             host: String::from(host),
             port: port as u32,
         };
-        let (outgoing_tx, outgoing_rx) = unbounded_channel();
+        let (outgoing_tx, outgoing_rx) = mpsc::channel(params.queue_size());
         let (broadcast_tx, _) = broadcast::channel(1024);
         let hpv = HyParView {
             me: me.clone(),
@@ -342,16 +342,25 @@ impl<C: ConnectionManager> HyParView<C> {
     /// queue. It also increments our pending messages counter so we have an
     /// idea of what our backlog is like.
     fn enqueue_message(&self, msg: OutgoingMessage) {
-        self.metrics.incr_pending(msg.name());
+        let name = msg.name();
+        self.metrics.incr_pending(name);
         self.pending_msgs.fetch_add(1, atomic::Ordering::SeqCst);
-        self.outgoing_msgs.send(msg).unwrap();
+        if let Err(e) = self.outgoing_msgs.try_send(msg) {
+            trace!(
+                "[{}] dropping message {}, queue error: {}",
+                self.me,
+                name,
+                e
+            );
+            self.metrics.report_msg_drop(name)
+        }
     }
 
     /// A background task that pulls from a mpsc and sends messages to other
     /// peers. We use this to decouple sending messages from receiving them.
     /// The HyParView paper makes a lot of assumptions of a fully asynchronus
     /// messaging model.
-    async fn outgoing_task(self, mut rx: UnboundedReceiver<OutgoingMessage>) {
+    async fn outgoing_task(self, mut rx: mpsc::Receiver<OutgoingMessage>) {
         trace!("[{}] outgoing task spawned", self.me);
         loop {
             if let Some(ref msg) = rx.recv().await {
