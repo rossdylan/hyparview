@@ -431,6 +431,7 @@ impl<C: ConnectionManager> HyParView<C> {
                 // ensure that if a failed peer is reported multiple times we
                 // only execute replacement for it once
                 if !state.active_view.contains(failed) {
+                    debug!("[{}] failed peer {} was already removed", self.me, failed);
                     return Ok(false);
                 }
                 // if the failed peer is the only peer in the active view the
