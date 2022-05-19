@@ -100,6 +100,7 @@ impl ServerMetrics {
             "hyparview_dropped_messages",
             "rate of dropped messages due to overflow of the outgoing queue"
         );
+        register_counter!("hyparview_dropped_messages");
         Self {
             forwarded_data_messages: register_counter!("hyparview_data_messages", "status" => "forwarded"),
             ignored_data_messages: register_counter!("hyparview_data_messages", "status" => "ignored"),

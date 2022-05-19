@@ -343,8 +343,6 @@ impl<C: ConnectionManager> HyParView<C> {
     /// idea of what our backlog is like.
     fn enqueue_message(&self, msg: OutgoingMessage) {
         let name = msg.name();
-        self.metrics.incr_pending(name);
-        self.pending_msgs.fetch_add(1, atomic::Ordering::SeqCst);
         if let Err(e) = self.outgoing_msgs.try_send(msg) {
             trace!(
                 "[{}] dropping message {}, queue error: {}",
@@ -353,6 +351,9 @@ impl<C: ConnectionManager> HyParView<C> {
                 e
             );
             self.metrics.report_msg_drop(name)
+        } else {
+            self.metrics.incr_pending(name);
+            self.pending_msgs.fetch_add(1, atomic::Ordering::SeqCst);
         }
     }
 
@@ -491,7 +492,13 @@ impl<C: ConnectionManager> HyParView<C> {
     /// the failure algorithm.
     async fn failure_handler(self) {
         loop {
-            for failed_peer in self.ftracker.wait().await {
+            let failed = self.ftracker.wait().await;
+            debug!(
+                "[{}] started failure handling iteration with {} failed peers",
+                self.me,
+                failed.len()
+            );
+            for failed_peer in failed {
                 let start_time = Instant::now();
                 trace!(
                     "[{}] peer {} has been marked as failed",
