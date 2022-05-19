@@ -75,6 +75,17 @@ impl OutgoingMessage {
             Self::Data { .. } => Self::DA_NAME,
         }
     }
+
+    pub fn dest(&self) -> &Peer {
+        match self {
+            Self::ForwardJoin { dest, .. } => dest,
+            Self::Disconnect { dest, .. } => dest,
+            Self::Neighbor { dest, .. } => dest,
+            Self::Shuffle { dest, .. } => dest,
+            Self::ShuffleReply { dest, .. } => dest,
+            Self::Data { dest, .. } => dest,
+        }
+    }
 }
 /// Implements the HyParView protocol over a generic transport layer. Messages
 /// from the transport layer are recieved over a channel. The protocol is driven
@@ -369,32 +380,39 @@ impl<C: ConnectionManager> HyParView<C> {
                 self.metrics.decr_pending(msg.name());
                 self.pending_msgs.fetch_sub(1, atomic::Ordering::SeqCst);
 
-                // TODO(rossdylan): since outgoing task is expected to be 'static
-                // can we spawn more tasks here to vastly increase the concurrency
-                // of this queue?
-                let (res, dest) = match msg {
+                // Extract destination and check to make sure we are actually
+                // connected to it
+                let dest = msg.dest();
+                let is_transient = matches!(
+                    msg,
+                    OutgoingMessage::Disconnect { .. } | OutgoingMessage::ShuffleReply { .. }
+                );
+                if !self.state.lock().unwrap().active_view.contains(dest) && !is_transient {
+                    continue;
+                }
+                let res = match msg {
                     OutgoingMessage::ForwardJoin { src, dest, ttl } => {
-                        (self.send_forward_join(src, dest, *ttl).await, dest)
+                        self.send_forward_join(src, dest, *ttl).await
                     }
                     OutgoingMessage::Disconnect { dest } => {
                         self.send_disconnect(dest).await;
                         let _ = self.manager.disconnect(dest).await;
-                        (Ok(()), dest)
+                        Ok(())
                     }
                     OutgoingMessage::Neighbor { dest, prio } => {
                         let resp = self.send_neighbor(dest, *prio).await.map(|_| ());
-                        (resp, dest)
+                        resp
                     }
                     OutgoingMessage::Shuffle {
                         src,
                         dest,
                         peers,
                         ttl,
-                    } => (self.send_shuffle(src, dest, *ttl, peers).await, dest),
+                    } => self.send_shuffle(src, dest, *ttl, peers).await,
                     OutgoingMessage::ShuffleReply { dest, peers } => {
-                        (self.send_shuffle_reply(dest, peers).await, dest)
+                        self.send_shuffle_reply(dest, peers).await
                     }
-                    OutgoingMessage::Data { dest, req } => (self.send_data(dest, req).await, dest),
+                    OutgoingMessage::Data { dest, req } => self.send_data(dest, req).await,
                 };
                 if let Err(e) = res {
                     warn!(
