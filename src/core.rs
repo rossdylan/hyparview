@@ -160,6 +160,14 @@ impl<C: ConnectionManager> HyParView<C> {
         self.broadcast_tx.subscribe()
     }
 
+    /// Hint to the failure tracker that a peer has failed. Useful for higher
+    /// level abstractions which may have their own concept of failure.
+    pub fn hint_failure(&self, peer: &Peer) {
+        if self.state.lock().unwrap().active_view.contains(peer) {
+            self.ftracker.fail(peer);
+        }
+    }
+
     /// Broadcast some data into the gossip network by sending it to all our
     /// active peers. If we fail to send data to any peers, or there are no
     /// active peers we return an error
@@ -200,8 +208,6 @@ impl<C: ConnectionManager> HyParView<C> {
             .report_broadcast(sent, broadcast_start_time.elapsed());
         if sent {
             Ok(())
-        } else if self.state.lock().unwrap().netsplit {
-            Err(Error::FatalNetsplit)
         } else {
             Err(Error::BroadcastFailed)
         }
@@ -338,7 +344,6 @@ impl<C: ConnectionManager> HyParView<C> {
                 break;
             }
         }
-        self.state.lock().unwrap().set_netsplit(false);
         Ok(())
     }
 
@@ -892,7 +897,7 @@ mod tests {
     #[derive(Debug)]
     struct TestInstanceExtras {
         signal: Option<tokio::sync::oneshot::Sender<()>>,
-        handle: JoinHandle<()>,
+        handle: Option<JoinHandle<()>>,
     }
 
     #[derive(Debug, Clone)]
@@ -946,7 +951,7 @@ mod tests {
                 inner: hpv,
                 extras: Arc::new(Mutex::new(TestInstanceExtras {
                     signal: Some(tx),
-                    handle: jh,
+                    handle: Some(jh),
                 })),
             })
         }
@@ -958,7 +963,8 @@ mod tests {
                 error!("failed to send shutdown signal to tonic");
                 return;
             }
-            if let Err(e) = (&mut self.extras.lock().unwrap().handle).await {
+            let jh = self.extras.lock().unwrap().handle.take().unwrap();
+            if let Err(e) = jh.await {
                 error!("error while shutting down tonic: {}", e);
             }
         }
@@ -1039,6 +1045,7 @@ mod tests {
 
         peer_to_inst.get_mut(&rpeer).unwrap().stop().await;
         peer_to_inst.remove(&rpeer);
+        wait_for_convergence(&peer_to_inst).await;
 
         // Attempt a broadcast into the network
         let bpeer: Peer = peers
@@ -1047,6 +1054,7 @@ mod tests {
             .choose(&mut rand::thread_rng())
             .map(Clone::clone)
             .unwrap();
+        assert!(!peer_to_inst.get(&bpeer).unwrap().active_view().is_empty());
         let msg = "foobar".as_bytes();
         peer_to_inst.get(&bpeer).unwrap().broadcast(msg).await?;
         // wait for the next failure tick to occur
