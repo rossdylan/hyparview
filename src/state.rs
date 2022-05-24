@@ -231,6 +231,8 @@ impl State {
         if self.active_view.contains(peer) || *peer == self.me {
             return None;
         }
+        // ensure that if this node is in our passive view, we remove it
+        self.passive_view.remove(peer);
         let dropped = if self.active_view.len() >= self.params.active_size() {
             let rn = random_node_from_view(&self.active_view);
             debug_assert!(
@@ -276,9 +278,9 @@ impl State {
             .record_view_sizes(self.active_view.len(), self.passive_view.len());
     }
 
-    pub(crate) fn add_peers_to_passive(&mut self, peers: Vec<Peer>) {
+    pub(crate) fn add_peers_to_passive(&mut self, peers: &[Peer]) {
         for peer in peers {
-            self.add_to_passive_view(&peer)
+            self.add_to_passive_view(peer)
         }
     }
 

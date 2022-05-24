@@ -210,14 +210,14 @@ impl ConnectionManager for InMemoryConnectionManager {
 #[async_trait::async_trait]
 pub trait BootstrapSource: Send + Sync {
     /// Retreive the next possible bootstrap node data from a BootstrapSource
-    async fn next_peer(&mut self) -> Result<Option<Peer>>;
+    async fn peers(&mut self) -> Result<Vec<Peer>>;
 }
 
 #[async_trait::async_trait]
 impl<S: std::net::ToSocketAddrs + Send + Sync + Clone> BootstrapSource for S {
-    async fn next_peer(&mut self) -> Result<Option<Peer>> {
-        let mut addrs = self.to_socket_addrs()?;
-        Ok(addrs.next().map(Into::into))
+    async fn peers(&mut self) -> Result<Vec<Peer>> {
+        let addrs = self.to_socket_addrs()?;
+        Ok(addrs.map(Into::into).collect())
     }
 }
 
@@ -229,7 +229,6 @@ impl<S: std::net::ToSocketAddrs + Send + Sync + Clone> BootstrapSource for S {
 pub struct DNSBootstrapSource {
     domain: String,
     port: u16,
-    resolved: Option<trust_dns_resolver::lookup_ip::LookupIpIntoIter>,
 }
 
 impl DNSBootstrapSource {
@@ -239,38 +238,22 @@ impl DNSBootstrapSource {
         Self {
             domain: domain.into(),
             port,
-            resolved: None,
         }
-    }
-}
-
-/// yolo to the max, we can't clone the underlying iter of a bootstrap source
-/// so we just reinitialize with the base parameters so we can hold a copy for
-/// reinitialize purposes
-impl Clone for DNSBootstrapSource {
-    fn clone(&self) -> Self {
-        Self::new(&self.domain, self.port)
     }
 }
 
 #[async_trait::async_trait]
 impl BootstrapSource for DNSBootstrapSource {
-    async fn next_peer(&mut self) -> Result<Option<Peer>> {
-        if self.resolved.is_none() {
-            // TODO(rossdylan): Propagate errors correctly here and maybe start up
-            // a new temp runtime
-            let resolver = trust_dns_resolver::TokioAsyncResolver::tokio_from_system_conf()?;
-            let result = resolver.lookup_ip(&self.domain).await?;
-            self.resolved.replace(result.into_iter());
-        }
-        let item = self
-            .resolved
-            .as_mut()
-            .and_then(|li| li.next())
+    async fn peers(&mut self) -> Result<Vec<Peer>> {
+        let resolver = trust_dns_resolver::TokioAsyncResolver::tokio_from_system_conf()?;
+        let result = resolver.lookup_ip(&self.domain).await?;
+        let peers = result
+            .iter()
             .map(|r| Peer {
                 host: r.to_string(),
                 port: self.port as u32,
-            });
-        Ok(item)
+            })
+            .collect();
+        Ok(peers)
     }
 }

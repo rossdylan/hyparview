@@ -345,31 +345,29 @@ impl<C: ConnectionManager> HyParView<C> {
     /// the `BootstrapSource`
     pub async fn init(&mut self, mut boots: impl BootstrapSource) -> Result<()> {
         self.state.lock().unwrap().clear();
-        while let Some(ref contact_peer) = boots.next_peer().await? {
-            self.state.lock().unwrap().add_to_active_view(contact_peer);
-            let join_res = self.send_join(contact_peer).await;
+        let peers = boots.peers().await?;
+        for (index, peer) in peers.iter().enumerate() {
+            self.state.lock().unwrap().add_to_active_view(peer);
+            let join_res = self.send_join(peer).await;
             match join_res {
                 Ok(resp) => {
-                    debug!(
-                        "[{}] bootstrap successful, initial peer: {}",
-                        self.me, contact_peer
-                    );
-                    self.state
-                        .lock()
-                        .unwrap()
-                        .add_peers_to_passive(resp.passive_peers);
-                    break;
+                    debug!("[{}] bootstrap successful, initial peer: {}", self.me, peer);
+
+                    // take the rest of our bootstrap peers as well as the passive
+                    // view given to us by our bootstrap peer to fill out the passive
+                    // view on join
+                    let mut state = self.state.lock().unwrap();
+                    state.add_peers_to_passive(&peers[index..]);
+                    state.add_peers_to_passive(&resp.passive_peers);
+                    return Ok(());
                 }
                 Err(e) => {
-                    self.state.lock().unwrap().disconnect(contact_peer);
-                    warn!(
-                        "failed to contact bootstrap node: {:?}: {}",
-                        contact_peer, e
-                    );
+                    self.state.lock().unwrap().disconnect(peer);
+                    warn!("failed to contact bootstrap peer: {:?}: {}", peer, e);
                 }
             }
         }
-        Ok(())
+        Err(Error::NoBootstrapAddrsFound)
     }
 
     /// Send the peer that had a failure over to our async failure handler
@@ -1187,8 +1185,13 @@ mod tests {
         // Now we attempt to verify network invariants
         for (current_peer, instance) in peer_to_inst.iter() {
             let active_view = instance.active_view();
+            let passive_view = instance._passive_view();
+
+            // There should not be any overlap between active and passive views
+            assert!(passive_view.is_disjoint(&active_view));
 
             assert!(current_peer == &instance.me);
+
             // Assert that the hpv instance doesn't contain itself
             assert!(
                 active_view.get(current_peer).is_none(),
