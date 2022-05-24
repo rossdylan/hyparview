@@ -356,8 +356,13 @@ impl<C: ConnectionManager> HyParView<C> {
                     // take the rest of our bootstrap peers as well as the passive
                     // view given to us by our bootstrap peer to fill out the passive
                     // view on join
+                    let new_passive: Vec<Peer> = peers[index..]
+                        .iter()
+                        .take(self.params.passive_size())
+                        .cloned()
+                        .collect();
                     let mut state = self.state.lock().unwrap();
-                    state.add_peers_to_passive(&peers[index..]);
+                    state.add_peers_to_passive(&new_passive);
                     state.add_peers_to_passive(&resp.passive_peers);
                     return Ok(());
                 }
