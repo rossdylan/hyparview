@@ -11,7 +11,7 @@ use futures::StreamExt;
 use indexmap::IndexSet;
 use svix_ksuid::KsuidLike;
 use tokio::sync::broadcast;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, trace, warn};
 
@@ -105,6 +105,7 @@ pub struct HyParView<C: ConnectionManager + 'static> {
     pending_msgs: Arc<atomic::AtomicU64>,
     state: Arc<Mutex<State>>,
     broadcast_tx: Arc<broadcast::Sender<(svix_ksuid::Ksuid, Vec<u8>)>>,
+    join_sem: Arc<Semaphore>,
     metrics: crate::metrics::ServerMetrics,
 }
 
@@ -143,6 +144,8 @@ impl<C: ConnectionManager> HyParView<C> {
             pending_msgs: Arc::new(Default::default()),
             state: Arc::new(Mutex::new(State::new(me, params))),
             broadcast_tx: Arc::new(broadcast_tx),
+            // NOTE(rossdylan): Allow 1 concurrent join
+            join_sem: Arc::new(Semaphore::new(1)),
             metrics: crate::metrics::ServerMetrics::new(),
         };
         // NOTE(rossdylan): I really don't like having HyParView::new(...) being
@@ -188,6 +191,10 @@ impl<C: ConnectionManager> HyParView<C> {
             let mut fset = FuturesOrdered::new();
             for peer in peers.iter() {
                 if self.ftracker.is_failed(peer) {
+                    debug!(
+                        "[{}] skipping initial broadcast to failed peer {}",
+                        self.me, peer
+                    );
                     continue;
                 }
                 let req_fut = self.send_data(peer, &req);
@@ -208,6 +215,14 @@ impl<C: ConnectionManager> HyParView<C> {
             .report_broadcast(sent, broadcast_start_time.elapsed());
         if sent {
             Ok(())
+        } else if self._passive_view().is_empty() {
+            // In the event that all active-view peers have failed and we have
+            // no passive view peers to replace them with inform our caller that
+            // we've reached a fatal netsplit. This is a bit of a cop-out since
+            // I'd prefer if we could attempt recovery on our own, but this will
+            // allow our users to handle netsplits in whatever way makes the most
+            // sense for their usecase
+            Err(Error::FatalNetsplit)
         } else {
             Err(Error::BroadcastFailed)
         }
@@ -221,15 +236,16 @@ impl<C: ConnectionManager> HyParView<C> {
         self.state.lock().unwrap().passive_view.clone()
     }
 
-    async fn send_join(&self, peer: &Peer) -> Result<()> {
+    async fn send_join(&self, peer: &Peer) -> Result<crate::proto::JoinResponse> {
         let mut client = self.manager.connect(peer).await?;
         client
             .join(crate::proto::JoinRequest {
                 source: Some(self.me.clone()),
                 id: gen_msg_id(),
             })
-            .await?;
-        Ok(())
+            .await
+            .map(|r| r.into_inner())
+            .map_err(Into::into)
     }
 
     async fn send_neighbor(&self, peer: &Peer, prio: NeighborPriority) -> Result<bool> {
@@ -328,20 +344,29 @@ impl<C: ConnectionManager> HyParView<C> {
     /// init will only fail if we can't contact any peers from provided by
     /// the `BootstrapSource`
     pub async fn init(&mut self, mut boots: impl BootstrapSource) -> Result<()> {
+        self.state.lock().unwrap().clear();
         while let Some(ref contact_peer) = boots.next_peer().await? {
             self.state.lock().unwrap().add_to_active_view(contact_peer);
-            if let Err(e) = self.send_join(contact_peer).await {
-                self.state.lock().unwrap().disconnect(contact_peer);
-                warn!(
-                    "failed to contact bootstrap node: {:?}: {}",
-                    contact_peer, e
-                );
-            } else {
-                debug!(
-                    "[{}] bootstrap successful, initial peer: {}",
-                    self.me, contact_peer
-                );
-                break;
+            let join_res = self.send_join(contact_peer).await;
+            match join_res {
+                Ok(resp) => {
+                    debug!(
+                        "[{}] bootstrap successful, initial peer: {}",
+                        self.me, contact_peer
+                    );
+                    self.state
+                        .lock()
+                        .unwrap()
+                        .add_peers_to_passive(resp.passive_peers);
+                    break;
+                }
+                Err(e) => {
+                    self.state.lock().unwrap().disconnect(contact_peer);
+                    warn!(
+                        "failed to contact bootstrap node: {:?}: {}",
+                        contact_peer, e
+                    );
+                }
             }
         }
         Ok(())
@@ -604,15 +629,19 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
     async fn join(
         &self,
         request: Request<crate::proto::JoinRequest>,
-    ) -> StdResult<Response<Empty>, Status> {
+    ) -> StdResult<Response<crate::proto::JoinResponse>, Status> {
+        let _permit = self.join_sem.acquire().await.unwrap();
         let req_ref = request.get_ref();
         if req_ref.source.is_none() {
             return Err(Status::invalid_argument("no source peer specified"));
         }
         let source = req_ref.source.as_ref().unwrap();
         if source == &self.me {
-            return Ok(Response::new(Empty {}));
+            return Ok(Response::new(crate::proto::JoinResponse {
+                passive_peers: vec![],
+            }));
         }
+
         // Treat this as a warning in case its transient, if it isn't the
         // failure detection will clean it up properly soon
         if let Err(e) = self.manager.connect(source).await {
@@ -638,7 +667,8 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
                 ttl: self.params.active_rwl(),
             });
         }
-        Ok(Response::new(Empty {}))
+        let passive_peers = state.passive_view.iter().cloned().collect();
+        Ok(Response::new(crate::proto::JoinResponse { passive_peers }))
     }
 
     async fn forward_join(
@@ -703,11 +733,24 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
         }
         let source = req_ref.source.as_ref().unwrap();
         debug!("[{}] recieved disconnect from {}", self.me, source);
-        self.state.lock().unwrap().disconnect(source);
-        debug_assert!(
-            !self.active_view().contains(source),
-            "active view contains peer after disconnect request"
-        );
+        {
+            let mut state = self.state.lock().unwrap();
+            state.disconnect(source);
+            if state.active_view.is_empty() {
+                if let Some(replacement) = state.random_passive_peer() {
+                    debug!(
+                        "[{}] disconnect from {} would empty active-view, replacing with {}",
+                        self.me, source, replacement
+                    );
+                    state.active_view.insert(replacement.clone());
+                    state.passive_view.remove(&replacement);
+                    self.enqueue_message(OutgoingMessage::Neighbor {
+                        dest: replacement,
+                        prio: NeighborPriority::High,
+                    })
+                }
+            }
+        }
         let _ = self.manager.disconnect(source).await;
         Ok(Response::new(Empty {}))
     }
@@ -860,10 +903,13 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
             }
         }
         for peer in active_peers.into_iter() {
-            let cloned_data = req_ref.clone();
             if peer == *source || self.ftracker.is_failed(&peer) {
+                if peer != *source {
+                    debug!("[{}] skipping broadcast to failed peer {}", self.me, peer);
+                }
                 continue;
             }
+            let cloned_data = req_ref.clone();
             self.enqueue_message(OutgoingMessage::Data {
                 dest: peer,
                 req: cloned_data,
@@ -946,6 +992,7 @@ mod tests {
                     )
                     .await
                     .unwrap();
+                debug!("tonic shutdown");
             });
             Ok(TestInstance {
                 inner: hpv,
@@ -995,7 +1042,7 @@ mod tests {
         tracing_subscriber::fmt::try_init();
         let cg = InMemoryConnectionGraph::new();
         let mut peers = Vec::new();
-        for index in 0..50 {
+        for index in 0..60 {
             peers.push(crate::proto::Peer {
                 host: "127.0.0.1".into(),
                 port: index,
@@ -1012,17 +1059,26 @@ mod tests {
         // FuturesUnordered set
         {
             let mut fset = FuturesUnordered::new();
-            for (_, instance) in peer_to_inst.iter_mut() {
-                let bs_peer = peers[0].clone();
-                fset.push(instance.init(bs_peer));
+            for (index, peer) in peers.iter().enumerate() {
+                let bs_index = if index == 0 { 0 } else { index - 1 };
+                let bs_peer = peers[bs_index].clone();
+                let mut instance = peer_to_inst.get_mut(peer).unwrap().clone();
+                fset.push(async move { instance.init(bs_peer).await });
             }
             while let Some(res) = fset.next().await {
                 res?;
             }
         }
-
         // Periodically check pending messages to wait for protocol convergence
         wait_for_convergence(&peer_to_inst).await;
+
+        for (peer, inst) in peer_to_inst.iter() {
+            assert!(
+                !inst.active_view().is_empty(),
+                "peer {} had empty active-view after init",
+                peer
+            )
+        }
 
         // shutdown a random instance
         let rpeer: Peer = peers
@@ -1043,10 +1099,15 @@ mod tests {
             })
             .collect();
 
+        debug!(
+            "will fail '{}' with active view: {:?}",
+            rpeer,
+            peer_to_inst.get_mut(&rpeer).unwrap().active_view()
+        );
         peer_to_inst.get_mut(&rpeer).unwrap().stop().await;
         peer_to_inst.remove(&rpeer);
         wait_for_convergence(&peer_to_inst).await;
-
+        debug!("shut down {} for test", rpeer);
         // Attempt a broadcast into the network
         let bpeer: Peer = peers
             .iter()
@@ -1054,9 +1115,15 @@ mod tests {
             .choose(&mut rand::thread_rng())
             .map(Clone::clone)
             .unwrap();
-        assert!(!peer_to_inst.get(&bpeer).unwrap().active_view().is_empty());
         let msg = "foobar".as_bytes();
-        peer_to_inst.get(&bpeer).unwrap().broadcast(msg).await?;
+        for peer in peers {
+            if peer == rpeer {
+                continue;
+            }
+            assert!(!peer_to_inst.get(&bpeer).unwrap().active_view().is_empty());
+            peer_to_inst.get(&peer).unwrap().broadcast(msg).await?;
+        }
+        debug!("completed broadcast");
         // wait for the next failure tick to occur
         tokio::time::sleep(Duration::from_secs(1)).await;
         // Periodically check pending messages to wait for protocol convergence
@@ -1103,9 +1170,11 @@ mod tests {
         // FuturesUnordered set
         {
             let mut fset = FuturesUnordered::new();
-            for (_, instance) in peer_to_inst.iter_mut() {
-                let bs_peer = peers[0].clone();
-                fset.push(instance.init(bs_peer));
+            for (index, peer) in peers.iter().enumerate() {
+                let bs_index = if index == 0 { 0 } else { index - 1 };
+                let bs_peer = peers[bs_index].clone();
+                let mut instance = peer_to_inst.get_mut(peer).unwrap().clone();
+                fset.push(async move { instance.init(bs_peer).await });
             }
             while let Some(res) = fset.next().await {
                 res?;
@@ -1142,6 +1211,69 @@ mod tests {
                     peer_instance.active_view(),
                 );
             }
+        }
+        Ok(())
+    }
+
+    /// Test to ensure that a broadcast into a healthy network reaches all peers
+    #[tokio::test]
+    async fn test_broadcast() -> Result<()> {
+        tracing_subscriber::fmt::try_init();
+        let cg = InMemoryConnectionGraph::new();
+        let mut peers = Vec::new();
+        for index in 0..50 {
+            peers.push(crate::proto::Peer {
+                host: "127.0.0.1".into(),
+                port: index,
+            })
+        }
+        let mut peer_to_inst = HashMap::new();
+        // TODO(rossdylan): Throw this into a `FuturesOrdered`
+        for peer in peers.iter() {
+            let instance = TestInstance::new(peer, &cg).await?;
+            peer_to_inst.insert(peer.clone(), instance);
+        }
+
+        // NOTE(rossdylan): In a block to make lifetimes happy with the
+        // FuturesUnordered set
+        {
+            let mut fset = FuturesUnordered::new();
+            for (index, peer) in peers.iter().enumerate() {
+                let bs_index = if index == 0 { 0 } else { index - 1 };
+                let bs_peer = peers[bs_index].clone();
+                let mut instance = peer_to_inst.get_mut(peer).unwrap().clone();
+                fset.push(async move { instance.init(bs_peer).await });
+            }
+            while let Some(res) = fset.next().await {
+                res?;
+            }
+        }
+
+        // Periodically check pending messages to wait for protocol convergence
+        wait_for_convergence(&peer_to_inst).await;
+
+        {
+            let mut fset = FuturesUnordered::new();
+            for (p, instance) in peer_to_inst.iter() {
+                if p == &peers[0] {
+                    continue;
+                }
+                let mut sub = instance.subscribe();
+                fset.push(async move { sub.recv().await });
+            }
+            peer_to_inst[&peers[0]]
+                .broadcast("foobar".as_bytes())
+                .await?;
+            let mut count = 0;
+            while let Some(Ok(_)) = fset.next().await {
+                count += 1;
+                debug!("count={}, expected={}", count, peer_to_inst.len() - 1);
+            }
+            assert_eq!(
+                count,
+                peer_to_inst.len() - 1,
+                "broadcast did not reach all peers"
+            )
         }
         Ok(())
     }

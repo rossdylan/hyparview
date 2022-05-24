@@ -27,6 +27,10 @@ message JoinRequest {
     bytes id = 2;
 }
 
+message JoinResponse {
+    repeated Peer passive_peers = 1;
+}
+
 message ForwardJoinRequest {
     Peer source = 1;
     bytes id = 2;
@@ -66,7 +70,7 @@ message DataRequest {
 // TODO(rossdylan): Originally we just had a single OneOf style protocol but
 // I've split it all out, idk if its better
 service Hyparview {
-    rpc Join(JoinRequest) returns(Empty);
+    rpc Join(JoinRequest) returns(JoinResponse);
     rpc ForwardJoin(ForwardJoinRequest) returns(Empty);
     rpc Disconnect(DisconnectRequest) returns(Empty);
     rpc Neighbor(NeighborRequest) returns(NeighborResponse);

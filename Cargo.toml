@@ -7,7 +7,6 @@ license = "MIT"
 
 [dependencies]
 async-trait = "0.1.53"
-dyn-clone = "1"
 futures = "0.3"
 indexmap = "1.8"
 lru = "0.7"

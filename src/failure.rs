@@ -26,7 +26,7 @@ impl TrackerState {
         self.last_triggered
             .as_ref()
             .map(Instant::elapsed)
-            .unwrap_or(Duration::ZERO)
+            .unwrap_or(Duration::MAX)
     }
 
     pub fn trigger(&mut self) {

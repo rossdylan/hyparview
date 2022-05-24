@@ -158,6 +158,14 @@ impl State {
         }
     }
 
+    /// Helper function to clear our views. We don't clear the message history
+    /// in order to avoid duplicate messages.
+    pub(crate) fn clear(&mut self) {
+        // TODO(rossdylan): Evalulate clearing message history as well
+        self.active_view.clear();
+        self.passive_view.clear();
+    }
+
     /// Select Kp nodes from the passive-view and Ka nodes from the active-view
     /// to service a shuffle request
     pub(crate) fn select_shuffle_peers(&self, ignore: Option<&Peer>) -> Vec<Peer> {
@@ -266,6 +274,12 @@ impl State {
         self.passive_view.insert(peer.clone());
         self.metrics
             .record_view_sizes(self.active_view.len(), self.passive_view.len());
+    }
+
+    pub(crate) fn add_peers_to_passive(&mut self, peers: Vec<Peer>) {
+        for peer in peers {
+            self.add_to_passive_view(&peer)
+        }
     }
 
     /// Replace a failed peer with one from the passive view

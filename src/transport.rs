@@ -9,7 +9,6 @@ use crate::error::{Error, Result};
 use crate::proto::hyparview_client::HyparviewClient;
 use crate::proto::Peer;
 
-use dyn_clone::DynClone;
 use lru::LruCache;
 use tokio::io::DuplexStream;
 use tokio::sync::mpsc;
@@ -209,11 +208,10 @@ impl ConnectionManager for InMemoryConnectionManager {
 /// BoostrapSource is used to generate the initial node to try and join to.
 /// If we run out of bootstrap nodes an error should be returned
 #[async_trait::async_trait]
-pub trait BootstrapSource: DynClone + Send + Sync {
+pub trait BootstrapSource: Send + Sync {
     /// Retreive the next possible bootstrap node data from a BootstrapSource
     async fn next_peer(&mut self) -> Result<Option<Peer>>;
 }
-dyn_clone::clone_trait_object!(BootstrapSource);
 
 #[async_trait::async_trait]
 impl<S: std::net::ToSocketAddrs + Send + Sync + Clone> BootstrapSource for S {
