@@ -456,6 +456,9 @@ impl<C: ConnectionManager> HyParView<C> {
                         e
                     );
                     self.report_failure(dest);
+                } else {
+                    // if we succeeded mark the peer as back up
+                    self.ftracker.remove(dest);
                 }
                 self.metrics.report_outgoing_loop_time(start_time.elapsed());
             } else {
@@ -567,10 +570,7 @@ impl<C: ConnectionManager> HyParView<C> {
                     }
                     Err(e) => {
                         self.metrics.report_peer_replacement(false);
-                        warn!(
-                            "[{}] unable to replace {}, no healthy peers in passive view: {}",
-                            self.me, failed_peer, e
-                        );
+                        warn!("[{}] unable to replace {}: {}", self.me, failed_peer, e);
                     }
                 }
                 self.metrics.report_failure_loop_time(start_time.elapsed());
