@@ -355,9 +355,12 @@ impl<C: ConnectionManager> HyParView<C> {
         self.state.lock().unwrap().clear();
 
         // Grab our initial peers from the bootstrap source and shuffle them to
-        // ensure we don't hammer the first peer in the list
+        // ensure we don't hammer the first peer in the list. Additionally
+        // truncate it to the size of our active view to avoid cases where we
+        // attempt to contact a huge number of peers
         let mut peers = boots.peers().await?;
         peers.shuffle(&mut rand::thread_rng());
+        peers.truncate(peers.len().min(self.params.active_size()));
 
         for (index, peer) in peers.iter().enumerate() {
             self.state.lock().unwrap().add_to_active_view(peer);
