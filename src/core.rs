@@ -215,7 +215,7 @@ impl<C: ConnectionManager> HyParView<C> {
             .report_broadcast(sent, broadcast_start_time.elapsed());
         if sent {
             Ok(())
-        } else if self._passive_view().is_empty() {
+        } else if self.passive_view().is_empty() {
             // In the event that all active-view peers have failed and we have
             // no passive view peers to replace them with inform our caller that
             // we've reached a fatal netsplit. This is a bit of a cop-out since
@@ -232,7 +232,7 @@ impl<C: ConnectionManager> HyParView<C> {
         self.state.lock().unwrap().active_view.clone()
     }
 
-    pub(crate) fn _passive_view(&self) -> IndexSet<Peer> {
+    pub(crate) fn passive_view(&self) -> IndexSet<Peer> {
         self.state.lock().unwrap().passive_view.clone()
     }
 
@@ -351,8 +351,6 @@ impl<C: ConnectionManager> HyParView<C> {
             let join_res = self.send_join(peer).await;
             match join_res {
                 Ok(resp) => {
-                    debug!("[{}] bootstrap successful, initial peer: {}", self.me, peer);
-
                     // take the rest of our bootstrap peers as well as the passive
                     // view given to us by our bootstrap peer to fill out the passive
                     // view on join
@@ -364,6 +362,15 @@ impl<C: ConnectionManager> HyParView<C> {
                     let mut state = self.state.lock().unwrap();
                     state.add_peers_to_passive(&new_passive);
                     state.add_peers_to_passive(&resp.passive_peers);
+
+                    debug!(
+                        "[{}] bootstrap successful, initial peer: {}, active: {:?}, passive: {:?}",
+                        self.me,
+                        peer,
+                        self.active_view(),
+                        self.passive_view()
+                    );
+
                     return Ok(());
                 }
                 Err(e) => {
@@ -1190,7 +1197,7 @@ mod tests {
         // Now we attempt to verify network invariants
         for (current_peer, instance) in peer_to_inst.iter() {
             let active_view = instance.active_view();
-            let passive_view = instance._passive_view();
+            let passive_view = instance.passive_view();
 
             // There should not be any overlap between active and passive views
             assert!(passive_view.is_disjoint(&active_view));
