@@ -9,9 +9,11 @@ use std::time::Instant;
 use futures::stream::FuturesOrdered;
 use futures::StreamExt;
 use indexmap::IndexSet;
+use leaky_bucket::RateLimiter;
+use rand::prelude::SliceRandom;
 use svix_ksuid::KsuidLike;
 use tokio::sync::broadcast;
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::mpsc;
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, trace, warn};
 
@@ -95,7 +97,8 @@ impl OutgoingMessage {
 /// 2. Reactive changes to the active-view are handled via a 2nd thread that
 ///    receives failure notifications over another channel.
 /// 3. Periodic passive-view shuffles are executed on a timer in a 3rd thread
-#[derive(Clone, Debug)]
+#[allow(missing_debug_implementations)]
+#[derive(Clone)]
 pub struct HyParView<C: ConnectionManager + 'static> {
     me: Peer,
     params: NetworkParameters,
@@ -105,7 +108,7 @@ pub struct HyParView<C: ConnectionManager + 'static> {
     pending_msgs: Arc<atomic::AtomicU64>,
     state: Arc<Mutex<State>>,
     broadcast_tx: Arc<broadcast::Sender<(svix_ksuid::Ksuid, Vec<u8>)>>,
-    join_sem: Arc<Semaphore>,
+    join_rl: Arc<RateLimiter>,
     metrics: crate::metrics::ServerMetrics,
 }
 
@@ -144,8 +147,13 @@ impl<C: ConnectionManager> HyParView<C> {
             pending_msgs: Arc::new(Default::default()),
             state: Arc::new(Mutex::new(State::new(me, params))),
             broadcast_tx: Arc::new(broadcast_tx),
-            // NOTE(rossdylan): Allow 1 concurrent join
-            join_sem: Arc::new(Semaphore::new(1)),
+            // limit of 1 join per second
+            join_rl: Arc::new(
+                RateLimiter::builder()
+                    .initial(params.join_rate())
+                    .interval(Duration::from_secs(1))
+                    .build(),
+            ),
             metrics: crate::metrics::ServerMetrics::new(),
         };
         // NOTE(rossdylan): I really don't like having HyParView::new(...) being
@@ -345,7 +353,13 @@ impl<C: ConnectionManager> HyParView<C> {
     /// the `BootstrapSource`
     pub async fn init(&mut self, mut boots: impl BootstrapSource) -> Result<()> {
         self.state.lock().unwrap().clear();
-        let peers = boots.peers().await?;
+
+        // Grab our initial peers from the bootstrap source and shuffle them to
+        // ensure we don't hammer the first peer in the list
+        let mut peers = boots.peers().await?;
+        let mut rng = rand::thread_rng();
+        peers.shuffle(&mut rng);
+
         for (index, peer) in peers.iter().enumerate() {
             self.state.lock().unwrap().add_to_active_view(peer);
             let join_res = self.send_join(peer).await;
@@ -640,7 +654,9 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
         &self,
         request: Request<crate::proto::JoinRequest>,
     ) -> StdResult<Response<crate::proto::JoinResponse>, Status> {
-        let _permit = self.join_sem.acquire().await.unwrap();
+        // To avoid flooding the network with ForwardJoin requests we limit
+        // incoming Join's to 1 per second.
+        self.join_rl.acquire_one().await;
         let req_ref = request.get_ref();
         if req_ref.source.is_none() {
             return Err(Status::invalid_argument("no source peer specified"));
@@ -956,7 +972,7 @@ mod tests {
         handle: Option<JoinHandle<()>>,
     }
 
-    #[derive(Debug, Clone)]
+    #[derive(Clone)]
     struct TestInstance {
         inner: HyParView<InMemoryConnectionManager>,
         extras: Arc<Mutex<TestInstanceExtras>>,
@@ -984,7 +1000,7 @@ mod tests {
             let hpv = HyParView::with_transport(
                 &peer.host,
                 peer.port as u16,
-                NetworkParameters::default(),
+                NetworkParameters::default_for_test(),
                 manager,
             );
             let incoming = cg.register(peer).await?;

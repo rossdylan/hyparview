@@ -29,6 +29,8 @@ const SHUFFLE_PASSIVE: usize = 4;
 
 const DEFAULT_QUEUE_SIZE: usize = 2048;
 
+const DEFAULT_JOIN_RATE: usize = 1;
+
 /// Constants used to derive active and passive view sizes
 #[derive(Clone, Copy, Debug)]
 pub struct NetworkParameters {
@@ -58,6 +60,9 @@ pub struct NetworkParameters {
 
     /// The size of our outgoing messages queue
     outgoing_queue_size: usize,
+
+    /// Rate at which join requests are processed
+    joins_per_sec: usize,
 }
 
 impl NetworkParameters {
@@ -91,7 +96,11 @@ impl NetworkParameters {
         self.outgoing_queue_size
     }
 
-    /// Helper function to build a NetworkParameters struct with the given size
+    /// Number of joins per second we allow
+    pub fn join_rate(&self) -> usize {
+        self.joins_per_sec
+    }
+
     /// but keeping the default scaling factors.
     pub fn default_with_size(size: f64) -> Self {
         NetworkParameters {
@@ -104,6 +113,14 @@ impl NetworkParameters {
             kp: SHUFFLE_PASSIVE,
             ka: SHUFFLE_ACTIVE,
             outgoing_queue_size: DEFAULT_QUEUE_SIZE,
+            joins_per_sec: DEFAULT_JOIN_RATE,
+        }
+    }
+
+    pub(crate) fn default_for_test() -> Self {
+        Self {
+            joins_per_sec: 100,
+            ..Default::default()
         }
     }
 }
