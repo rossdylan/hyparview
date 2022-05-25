@@ -357,8 +357,7 @@ impl<C: ConnectionManager> HyParView<C> {
         // Grab our initial peers from the bootstrap source and shuffle them to
         // ensure we don't hammer the first peer in the list
         let mut peers = boots.peers().await?;
-        let mut rng = rand::thread_rng();
-        peers.shuffle(&mut rng);
+        peers.shuffle(&mut rand::thread_rng());
 
         for (index, peer) in peers.iter().enumerate() {
             self.state.lock().unwrap().add_to_active_view(peer);
@@ -1065,7 +1064,7 @@ mod tests {
     /// removed it from their views
     #[tokio::test]
     async fn test_failure_handling() -> Result<()> {
-        tracing_subscriber::fmt::try_init();
+        let _ = tracing_subscriber::fmt::try_init();
         let cg = InMemoryConnectionGraph::new();
         let mut peers = Vec::new();
         for index in 0..60 {
@@ -1170,13 +1169,30 @@ mod tests {
         Ok(())
     }
 
+    /// Simple test to ensure that the init future is Send. Previously there was
+    /// an issue with using thread_rng() in a local variable within the init
+    /// future. The Rng produced by thread_rng() is not Send, which means we
+    /// can not use it in a variable within init() and then spawn init
+    #[tokio::test]
+    async fn ensure_init_is_send() -> Result<()> {
+        let cg = InMemoryConnectionGraph::new();
+        let p = crate::proto::Peer {
+            host: "127.0.0.1".into(),
+            port: 0,
+        };
+        let mut inst = TestInstance::new(&p, &cg).await?;
+        let jh = tokio::spawn(async move { (*inst).init(p).await });
+        let _res = jh.await;
+        Ok(())
+    }
+
     /// Test the network bootstrap process by spawning 100 `HyParView` instances
     /// and connecting them all together using the first instance as the
     /// bootstrap. This acts a bit like an initial stress-test to ensure on
     /// something like a mass reboot the network recovers quickly
     #[tokio::test]
     async fn test_init() -> Result<()> {
-        tracing_subscriber::fmt::try_init();
+        let _ = tracing_subscriber::fmt::try_init();
         let cg = InMemoryConnectionGraph::new();
         let mut peers = Vec::new();
         for index in 0..100 {
@@ -1249,7 +1265,7 @@ mod tests {
     /// Test to ensure that a broadcast into a healthy network reaches all peers
     #[tokio::test]
     async fn test_broadcast() -> Result<()> {
-        tracing_subscriber::fmt::try_init();
+        let _ = tracing_subscriber::fmt::try_init();
         let cg = InMemoryConnectionGraph::new();
         let mut peers = Vec::new();
         for index in 0..50 {
