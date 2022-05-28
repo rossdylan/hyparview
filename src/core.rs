@@ -148,9 +148,14 @@ impl<C: ConnectionManager> HyParView<C> {
             state: Arc::new(Mutex::new(State::new(me, params))),
             broadcast_tx: Arc::new(broadcast_tx),
             // limit of 1 join per second
+            // NOTE(rossdylan): The initial value of 25 taken from lashup's
+            // implementation, allows for a large initial burst of joins on
+            // start
             join_rl: Arc::new(
                 RateLimiter::builder()
-                    .initial(params.join_rate())
+                    .max(params.join_rate())
+                    .refill(params.join_rate())
+                    .initial(25)
                     .interval(Duration::from_secs(1))
                     .build(),
             ),
