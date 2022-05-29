@@ -255,7 +255,7 @@ impl BootstrapSource for DNSBootstrapSource {
                 trust_dns_resolver::error::ResolveErrorKind::NoRecordsFound {
                     response_code,
                     ..
-                } => return Ok(vec![]),
+                } if self.nxdomain_as_empty => return Ok(vec![]),
                 _ => return Err(e.into()),
             },
         };
@@ -267,5 +267,23 @@ impl BootstrapSource for DNSBootstrapSource {
             })
             .collect();
         Ok(peers)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BootstrapSource;
+    use crate::error::Result;
+
+    #[tokio::test]
+    async fn test_dns_bootstrap_nxdomain() -> Result<()> {
+        let mut bs = super::DNSBootstrapSource::new("nxdomain.internal", 8888, true);
+        let peers = bs.peers().await?;
+        assert!(peers.is_empty());
+
+        let mut bs = super::DNSBootstrapSource::new("nxdomain.internal", 8888, false);
+        let result = bs.peers().await;
+        assert!(result.is_err());
+        Ok(())
     }
 }
