@@ -362,12 +362,21 @@ impl<C: ConnectionManager> HyParView<C> {
         // ensure we don't hammer the first peer in the list. Additionally
         // truncate it to the size of our active view to avoid cases where we
         // attempt to contact a huge number of peers
-        let mut peers = boots.peers().await?;
+        let mut peers: Vec<Peer> = boots
+            .peers()
+            .await?
+            .into_iter()
+            .filter(|p| *p != self.me)
+            .collect();
         if peers.is_empty() {
             return Err(Error::NoBootstrapAddrsFound);
         }
         peers.shuffle(&mut rand::thread_rng());
-        peers.truncate(peers.len().min(self.params.active_size()));
+        peers.truncate(
+            peers
+                .len()
+                .min(self.params.active_size() + self.params.passive_size()),
+        );
 
         for (index, peer) in peers.iter().enumerate() {
             self.state.lock().unwrap().add_to_active_view(peer);
@@ -1095,8 +1104,10 @@ mod tests {
         {
             let mut fset = FuturesUnordered::new();
             for (index, peer) in peers.iter().enumerate() {
-                let bs_index = if index == 0 { 0 } else { index - 1 };
-                let bs_peer = peers[bs_index].clone();
+                if index == 0 {
+                    continue;
+                }
+                let bs_peer = peers[index - 1].clone();
                 let mut instance = peer_to_inst.get_mut(peer).unwrap().clone();
                 fset.push(async move { instance.init(bs_peer).await });
             }
@@ -1223,8 +1234,10 @@ mod tests {
         {
             let mut fset = FuturesUnordered::new();
             for (index, peer) in peers.iter().enumerate() {
-                let bs_index = if index == 0 { 0 } else { index - 1 };
-                let bs_peer = peers[bs_index].clone();
+                if index == 0 {
+                    continue;
+                }
+                let bs_peer = peers[index - 1].clone();
                 let mut instance = peer_to_inst.get_mut(peer).unwrap().clone();
                 fset.push(async move { instance.init(bs_peer).await });
             }
@@ -1296,8 +1309,10 @@ mod tests {
         {
             let mut fset = FuturesUnordered::new();
             for (index, peer) in peers.iter().enumerate() {
-                let bs_index = if index == 0 { 0 } else { index - 1 };
-                let bs_peer = peers[bs_index].clone();
+                if index == 0 {
+                    continue;
+                }
+                let bs_peer = peers[index - 1].clone();
                 let mut instance = peer_to_inst.get_mut(peer).unwrap().clone();
                 fset.push(async move { instance.init(bs_peer).await });
             }
