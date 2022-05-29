@@ -1,4 +1,5 @@
 //! The core module contains the actual implementation of the hyparview protocol
+use std::error::Error as StdError;
 use std::result::Result as StdResult;
 use std::sync::atomic;
 use std::sync::Arc;
@@ -357,13 +358,14 @@ impl<C: ConnectionManager> HyParView<C> {
     /// init will only fail if we can't contact any peers from provided by
     /// the `BootstrapSource`
     pub async fn init(&mut self, mut boots: impl BootstrapSource) -> Result<()> {
-        self.state.lock().unwrap().clear();
-
         // Grab our initial peers from the bootstrap source and shuffle them to
         // ensure we don't hammer the first peer in the list. Additionally
         // truncate it to the size of our active view to avoid cases where we
         // attempt to contact a huge number of peers
         let mut peers = boots.peers().await?;
+        if peers.is_empty() {
+            return Err(Error::NoBootstrapAddrsFound);
+        }
         peers.shuffle(&mut rand::thread_rng());
         peers.truncate(peers.len().min(self.params.active_size()));
 
@@ -400,7 +402,7 @@ impl<C: ConnectionManager> HyParView<C> {
                 }
             }
         }
-        Err(Error::NoBootstrapAddrsFound)
+        Err(Error::BootstrapFailed)
     }
 
     /// Send the peer that had a failure over to our async failure handler
@@ -481,7 +483,7 @@ impl<C: ConnectionManager> HyParView<C> {
                         self.me,
                         msg.name(),
                         dest,
-                        e
+                        e,
                     );
                     self.report_failure(dest);
                 } else {
@@ -661,9 +663,6 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
         &self,
         request: Request<crate::proto::JoinRequest>,
     ) -> StdResult<Response<crate::proto::JoinResponse>, Status> {
-        // To avoid flooding the network with ForwardJoin requests we limit
-        // incoming Join's to 1 per second.
-        self.join_rl.acquire_one().await;
         let req_ref = request.get_ref();
         if req_ref.source.is_none() {
             return Err(Status::invalid_argument("no source peer specified"));
@@ -674,6 +673,9 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
                 passive_peers: vec![],
             }));
         }
+        // To avoid flooding the network with ForwardJoin requests we limit
+        // incoming Join's to 1 per second.
+        self.join_rl.acquire_one().await;
 
         // Treat this as a warning in case its transient, if it isn't the
         // failure detection will clean it up properly soon

@@ -11,7 +11,7 @@ pub enum Error {
     #[error("hyparview already initialized")]
     AlreadyInitialized,
     /// Tonic has failed to execute an RPC and returned a status error
-    #[error("rpc failure")]
+    #[error(transparent)]
     RPCFailure(#[from] tonic::Status),
     /// Tonic's transport layer has failed
     #[error("tonic failure")]
@@ -22,10 +22,15 @@ pub enum Error {
     /// We have failed to parse a socket address
     #[error("unable to parse address")]
     AddrParseFailed(#[from] std::io::Error),
-    /// An error that acts as a sentinal when we have run out of bootstrap
-    /// peers for first-contact
+    /// The bootstraper failed to find any peers to try and join to. Usually
+    /// means we are doing a cold-start and there are no instances registered
+    /// in whatever system we are pulling peers from.
     #[error("bootstrap source found no nodes")]
     NoBootstrapAddrsFound,
+    /// An error that acts as a sentinal when we have run out of bootstrap
+    /// peers for first-contact
+    #[error("unable to join any bootstrap peers")]
+    BootstrapFailed,
     /// Passive View is empty so we can not replace a failed active peer
     #[error("unable to replace failed peer, passive view empty")]
     PassiveViewEmpty,
