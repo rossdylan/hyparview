@@ -229,15 +229,17 @@ impl<S: std::net::ToSocketAddrs + Send + Sync + Clone> BootstrapSource for S {
 pub struct DNSBootstrapSource {
     domain: String,
     port: u16,
+    nxdomain_as_empty: bool,
 }
 
 impl DNSBootstrapSource {
     /// Create a new bootstrap source that resolves hyparview instances via
     /// DNS.
-    pub fn new(domain: &str, port: u16) -> Self {
+    pub fn new(domain: &str, port: u16, nxdomain_as_empty: bool) -> Self {
         Self {
             domain: domain.into(),
             port,
+            nxdomain_as_empty,
         }
     }
 }
@@ -246,8 +248,18 @@ impl DNSBootstrapSource {
 impl BootstrapSource for DNSBootstrapSource {
     async fn peers(&mut self) -> Result<Vec<Peer>> {
         let resolver = trust_dns_resolver::TokioAsyncResolver::tokio_from_system_conf()?;
-        let result = resolver.lookup_ip(&self.domain).await?;
-        let peers = result
+        let result_res = resolver.lookup_ip(&self.domain).await;
+        let records = match result_res {
+            Ok(records) => records,
+            Err(e) => match e.kind() {
+                trust_dns_resolver::error::ResolveErrorKind::NoRecordsFound {
+                    response_code,
+                    ..
+                } => return Ok(vec![]),
+                _ => return Err(e.into()),
+            },
+        };
+        let peers = records
             .iter()
             .map(|r| Peer {
                 host: r.to_string(),
