@@ -242,7 +242,8 @@ impl<C: ConnectionManager> HyParView<C> {
         }
     }
 
-    pub(crate) fn active_view(&self) -> IndexSet<Peer> {
+    /// Return the current set of active peers
+    pub fn active_view(&self) -> IndexSet<Peer> {
         self.state.lock().unwrap().active_view.clone()
     }
 
