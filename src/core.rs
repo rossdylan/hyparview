@@ -372,18 +372,27 @@ impl<C: ConnectionManager> HyParView<C> {
         if peers.is_empty() {
             return Err(Error::NoBootstrapAddrsFound);
         }
+        debug!("[{}] bootstrap peer list: {:?}", self.me, peers);
         peers.shuffle(&mut rand::thread_rng());
+        debug!("[{}] shuffled bootstrap peer list: {:?}", self.me, peers);
         peers.truncate(
             peers
                 .len()
                 .min(self.params.active_size() + self.params.passive_size()),
         );
+        debug!(
+            "[{}] shuffled truncated bootstrap peer list: {:?}",
+            self.me, peers
+        );
 
         for (index, peer) in peers.iter().enumerate() {
+            debug!("[{}] attempting to Join to {}", self.me, peer);
             self.state.lock().unwrap().add_to_active_view(peer);
             let join_res = self.send_join(peer).await;
+            debug!("[{}] got join response: {:?}", self.me, join_res);
             match join_res {
                 Ok(resp) => {
+                    debug!("[{}] successfully joined to {}", self.me, peer);
                     // take the rest of our bootstrap peers as well as the passive
                     // view given to us by our bootstrap peer to fill out the passive
                     // view on join
@@ -392,7 +401,16 @@ impl<C: ConnectionManager> HyParView<C> {
                         .take(self.params.passive_size())
                         .cloned()
                         .collect();
+
+                    debug!(
+                        "[{}] extra bootstrap passive peers: {:?}",
+                        self.me, new_passive
+                    );
                     let mut state = self.state.lock().unwrap();
+                    debug!(
+                        "[{}] extra JoinResponse passive peers: {:?}",
+                        self.me, resp.passive_peers
+                    );
                     state.add_peers_to_passive(&new_passive);
                     state.add_peers_to_passive(&resp.passive_peers);
 
@@ -683,10 +701,20 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
                 passive_peers: vec![],
             }));
         }
+        debug!(
+            "[{}] join from {}, before rate-limit: {}",
+            self.me,
+            source,
+            self.join_rl.balance()
+        );
         // To avoid flooding the network with ForwardJoin requests we limit
         // incoming Join's to 1 per second.
         self.join_rl.acquire_one().await;
 
+        debug!(
+            "[{}] join from {} after rate-limit, before connect",
+            self.me, source
+        );
         // Treat this as a warning in case its transient, if it isn't the
         // failure detection will clean it up properly soon
         if let Err(e) = self.manager.connect(source).await {
@@ -695,6 +723,10 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
                 source, e
             );
         }
+        debug!(
+            "[{}] join from {} after connect before state mod",
+            self.me, source
+        );
         let mut state = self.state.lock().unwrap();
         if let Some(dropped) = state.add_to_active_view(source) {
             self.enqueue_message(OutgoingMessage::Disconnect { dest: dropped });
