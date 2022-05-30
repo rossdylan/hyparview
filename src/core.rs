@@ -143,15 +143,14 @@ impl<C: ConnectionManager> HyParView<C> {
             me: me.clone(),
             params,
             manager,
-            ftracker: crate::failure::Tracker::new(Duration::from_millis(500)),
+            // ftracker period chosen via ~*science*~
+            // TODO(rossdylan): This value should be a [`NetworkParameters`]
+            // protocol value
+            ftracker: crate::failure::Tracker::new(Duration::from_secs(1)),
             outgoing_msgs: outgoing_tx,
             pending_msgs: Arc::new(Default::default()),
             state: Arc::new(Mutex::new(State::new(me, params))),
             broadcast_tx: Arc::new(broadcast_tx),
-            // limit of 1 join per second
-            // NOTE(rossdylan): The initial value of 25 taken from lashup's
-            // implementation, allows for a large initial burst of joins on
-            // start
             join_rl: Arc::new(
                 RateLimiter::builder()
                     .max(params.join_rate())
@@ -204,13 +203,13 @@ impl<C: ConnectionManager> HyParView<C> {
         {
             let mut fset = FuturesOrdered::new();
             for peer in peers.iter() {
-                if self.ftracker.is_failed(peer) {
-                    debug!(
-                        "[{}] skipping initial broadcast to failed peer {}",
-                        self.me, peer
-                    );
-                    continue;
-                }
+                //if self.ftracker.is_failed(peer) {
+                //    debug!(
+                //        "[{}] skipping initial broadcast to failed peer {}",
+                //        self.me, peer
+                //    );
+                //    continue;
+                //}
                 let req_fut = self.send_data(peer, &req);
                 fset.push(req_fut);
             }
@@ -221,6 +220,14 @@ impl<C: ConnectionManager> HyParView<C> {
                     warn!("[{}] failed to send broadcast to {}: {}", self.me, peer, e);
                     self.report_failure(peer);
                 } else {
+                    if self.ftracker.is_failed(peer) {
+                        trace!(
+                            "[{}] broadcast to failed peer {} succeeded, marking up",
+                            self.me,
+                            peer
+                        );
+                        self.ftracker.remove(peer)
+                    }
                     sent = true;
                 }
             }
@@ -369,30 +376,35 @@ impl<C: ConnectionManager> HyParView<C> {
             .into_iter()
             .filter(|p| *p != self.me)
             .collect();
+
+        // This is an optimization for cold-start's of a hyparview network. If
+        // there are no known nodes to bootstrap from the client application can
+        // be informed and take a different path
         if peers.is_empty() {
             return Err(Error::NoBootstrapAddrsFound);
         }
-        debug!("[{}] bootstrap peer list: {:?}", self.me, peers);
+        trace!("[{}] bootstrap peer list: {:?}", self.me, peers);
         peers.shuffle(&mut rand::thread_rng());
-        debug!("[{}] shuffled bootstrap peer list: {:?}", self.me, peers);
+        trace!("[{}] shuffled bootstrap peer list: {:?}", self.me, peers);
         peers.truncate(
             peers
                 .len()
                 .min(self.params.active_size() + self.params.passive_size()),
         );
-        debug!(
+        trace!(
             "[{}] shuffled truncated bootstrap peer list: {:?}",
-            self.me, peers
+            self.me,
+            peers
         );
 
         for (index, peer) in peers.iter().enumerate() {
-            debug!("[{}] attempting to Join to {}", self.me, peer);
+            trace!("[{}] attempting to Join to {}", self.me, peer);
             self.state.lock().unwrap().add_to_active_view(peer);
             let join_res = self.send_join(peer).await;
-            debug!("[{}] got join response: {:?}", self.me, join_res);
+            trace!("[{}] got join response: {:?}", self.me, join_res);
             match join_res {
                 Ok(resp) => {
-                    debug!("[{}] successfully joined to {}", self.me, peer);
+                    trace!("[{}] successfully joined to {}", self.me, peer);
                     // take the rest of our bootstrap peers as well as the passive
                     // view given to us by our bootstrap peer to fill out the passive
                     // view on join
@@ -403,13 +415,15 @@ impl<C: ConnectionManager> HyParView<C> {
                         .collect();
 
                     if !new_passive.is_empty() || !resp.passive_peers.is_empty() {
-                        debug!(
+                        trace!(
                             "[{}] extra bootstrap passive peers: {:?}",
-                            self.me, new_passive
+                            self.me,
+                            new_passive
                         );
-                        debug!(
+                        trace!(
                             "[{}] extra JoinResponse passive peers: {:?}",
-                            self.me, resp.passive_peers
+                            self.me,
+                            resp.passive_peers
                         );
                         let mut state = self.state.lock().unwrap();
                         state.add_peers_to_passive(&new_passive);
@@ -428,7 +442,7 @@ impl<C: ConnectionManager> HyParView<C> {
                 }
                 Err(e) => {
                     self.state.lock().unwrap().disconnect(peer);
-                    warn!("failed to contact bootstrap peer: {:?}: {}", peer, e);
+                    warn!("failed to join bootstrap peer: {:?}: {}", peer, e);
                 }
             }
         }
@@ -475,14 +489,24 @@ impl<C: ConnectionManager> HyParView<C> {
 
                 // Extract destination and check to make sure we are actually
                 // connected to it (unless it is a transient connection like ShuffleReply or Disconnect)
+                // We do this to ensure that during mass failures or nother
+                // network churn events we efficiently discard messages that we
+                // can no longer deliver
                 let dest = msg.dest();
                 let is_transient = matches!(
                     msg,
                     OutgoingMessage::Disconnect { .. } | OutgoingMessage::ShuffleReply { .. }
                 );
                 if !self.state.lock().unwrap().active_view.contains(dest) && !is_transient {
+                    trace!(
+                        "[{}] skipping outgoing {} msg to {}, not connected anymore",
+                        self.me,
+                        msg.name(),
+                        dest
+                    );
                     continue;
                 }
+
                 let res = match msg {
                     OutgoingMessage::ForwardJoin { src, dest, ttl } => {
                         self.send_forward_join(src, dest, *ttl).await
@@ -609,17 +633,11 @@ impl<C: ConnectionManager> HyParView<C> {
         loop {
             let failed = self.ftracker.wait().await;
             debug!(
-                "[{}] started failure handling iteration with {} failed peers",
-                self.me,
-                failed.len()
+                "[{}] started failure handling iteration: {:?}",
+                self.me, failed,
             );
             for failed_peer in failed {
                 let start_time = Instant::now();
-                trace!(
-                    "[{}] peer {} has been marked as failed",
-                    self.me,
-                    failed_peer
-                );
                 match self.replace_peer(&failed_peer).await {
                     Ok(replaced) => {
                         self.ftracker.remove(&failed_peer);

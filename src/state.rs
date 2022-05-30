@@ -29,7 +29,7 @@ const SHUFFLE_PASSIVE: usize = 4;
 
 const DEFAULT_QUEUE_SIZE: usize = 2048;
 
-const DEFAULT_JOIN_RATE: usize = 1;
+const DEFAULT_JOIN_RATE: usize = 5;
 
 /// Constants used to derive active and passive view sizes
 #[derive(Clone, Copy, Debug)]
