@@ -402,17 +402,19 @@ impl<C: ConnectionManager> HyParView<C> {
                         .cloned()
                         .collect();
 
-                    debug!(
-                        "[{}] extra bootstrap passive peers: {:?}",
-                        self.me, new_passive
-                    );
-                    let mut state = self.state.lock().unwrap();
-                    debug!(
-                        "[{}] extra JoinResponse passive peers: {:?}",
-                        self.me, resp.passive_peers
-                    );
-                    state.add_peers_to_passive(&new_passive);
-                    state.add_peers_to_passive(&resp.passive_peers);
+                    if !new_passive.is_empty() || !resp.passive_peers.is_empty() {
+                        debug!(
+                            "[{}] extra bootstrap passive peers: {:?}",
+                            self.me, new_passive
+                        );
+                        debug!(
+                            "[{}] extra JoinResponse passive peers: {:?}",
+                            self.me, resp.passive_peers
+                        );
+                        let mut state = self.state.lock().unwrap();
+                        state.add_peers_to_passive(&new_passive);
+                        state.add_peers_to_passive(&resp.passive_peers);
+                    }
 
                     debug!(
                         "[{}] bootstrap successful, initial peer: {}, active: {:?}, passive: {:?}",
