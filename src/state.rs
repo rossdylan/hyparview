@@ -35,34 +35,34 @@ const DEFAULT_JOIN_RATE: usize = 5;
 #[derive(Clone, Copy, Debug)]
 pub struct NetworkParameters {
     /// network size
-    size: f64,
+    pub size: f64,
 
     /// active-view scaling factor
-    c: f64,
+    pub c: f64,
 
     /// passive-view scaling factor
-    k: f64,
+    pub k: f64,
 
     /// active random walk ttl
-    arwl: u32,
+    pub arwl: u32,
 
     /// passive random walk ttl
-    prwl: u32,
+    pub prwl: u32,
 
     /// number of messages to track to avoid routing loops
-    msg_history: usize,
+    pub msg_history: usize,
 
     /// number of nodes from the passive-view included in a shuffle
-    kp: usize,
+    pub kp: usize,
 
     /// number of nodes from the active-view included in a shuffle
-    ka: usize,
+    pub ka: usize,
 
     /// The size of our outgoing messages queue
-    outgoing_queue_size: usize,
+    pub outgoing_queue_size: usize,
 
     /// Rate at which join requests are processed
-    joins_per_sec: usize,
+    pub joins_per_sec: usize,
 }
 
 impl NetworkParameters {
@@ -117,6 +117,9 @@ impl NetworkParameters {
         }
     }
 
+    /// Expose a test-only constructor that increases our joins-per-second rate
+    /// for the sake of speeding up tests
+    #[cfg(test)]
     pub(crate) fn default_for_test() -> Self {
         Self {
             joins_per_sec: 100,
@@ -141,7 +144,7 @@ impl Default for NetworkParameters {
 pub(crate) struct State {
     me: Peer,
     /// The initial parameters we set for executing the hyparview protocol
-    pub(crate) params: NetworkParameters,
+    params: NetworkParameters,
     /// The set of peers that make up the active-view
     pub(crate) active_view: IndexSet<Peer>,
     /// The set of peers that make up the passive-view
@@ -175,12 +178,9 @@ impl State {
         }
     }
 
-    /// Helper function to clear our views. We don't clear the message history
-    /// in order to avoid duplicate messages.
-    pub(crate) fn clear(&mut self) {
-        // TODO(rossdylan): Evalulate clearing message history as well
-        self.active_view.clear();
-        self.passive_view.clear();
+    /// Helper function to check if a peer is in our active view
+    pub(crate) fn active_contains(&self, peer: &Peer) -> bool {
+        self.active_view.contains(peer)
     }
 
     /// Select Kp nodes from the passive-view and Ka nodes from the active-view

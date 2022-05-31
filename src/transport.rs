@@ -253,7 +253,7 @@ impl BootstrapSource for DNSBootstrapSource {
             Ok(records) => records,
             Err(e) => match e.kind() {
                 trust_dns_resolver::error::ResolveErrorKind::NoRecordsFound {
-                    response_code,
+                    response_code: _,
                     ..
                 } if self.nxdomain_as_empty => return Ok(vec![]),
                 _ => return Err(e.into()),

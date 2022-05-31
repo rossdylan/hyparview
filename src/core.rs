@@ -1,5 +1,4 @@
 //! The core module contains the actual implementation of the hyparview protocol
-use std::error::Error as StdError;
 use std::result::Result as StdResult;
 use std::sync::atomic;
 use std::sync::Arc;
@@ -11,6 +10,7 @@ use futures::stream::FuturesOrdered;
 use futures::StreamExt;
 use indexmap::IndexSet;
 use leaky_bucket::RateLimiter;
+use rand::prelude::IteratorRandom;
 use rand::prelude::SliceRandom;
 use svix_ksuid::KsuidLike;
 use tokio::sync::broadcast;
@@ -90,14 +90,12 @@ impl OutgoingMessage {
         }
     }
 }
-/// Implements the HyParView protocol over a generic transport layer. Messages
-/// from the transport layer are recieved over a channel. The protocol is driven
-/// by 3 threads.
-/// 1. Messages from other nodes are received through the transport's channel and
-///    handled in a single thread.
-/// 2. Reactive changes to the active-view are handled via a 2nd thread that
-///    receives failure notifications over another channel.
-/// 3. Periodic passive-view shuffles are executed on a timer in a 3rd thread
+
+/// Implements the HyParView protocol over tonic based gRPC transport. Transport
+/// must be done via tonic/gRPC however the underlying tonic transport is generic
+/// This structure encapsulates the underlying protocol implementation and runs
+/// several background tasks to handle periodic shuffles, outgoing messages, and
+/// failure handling.
 #[allow(missing_debug_implementations)]
 #[derive(Clone)]
 pub struct HyParView<C: ConnectionManager + 'static> {
@@ -179,7 +177,7 @@ impl<C: ConnectionManager> HyParView<C> {
     /// Hint to the failure tracker that a peer has failed. Useful for higher
     /// level abstractions which may have their own concept of failure.
     pub fn hint_failure(&self, peer: &Peer) {
-        if self.state.lock().unwrap().active_view.contains(peer) {
+        if self.state.lock().unwrap().active_contains(peer) {
             self.ftracker.fail(peer);
         }
     }
@@ -203,13 +201,6 @@ impl<C: ConnectionManager> HyParView<C> {
         {
             let mut fset = FuturesOrdered::new();
             for peer in peers.iter() {
-                //if self.ftracker.is_failed(peer) {
-                //    debug!(
-                //        "[{}] skipping initial broadcast to failed peer {}",
-                //        self.me, peer
-                //    );
-                //    continue;
-                //}
                 let req_fut = self.send_data(peer, &req);
                 fset.push(req_fut);
             }
@@ -405,29 +396,27 @@ impl<C: ConnectionManager> HyParView<C> {
             match join_res {
                 Ok(resp) => {
                     trace!("[{}] successfully joined to {}", self.me, peer);
-                    // take the rest of our bootstrap peers as well as the passive
-                    // view given to us by our bootstrap peer to fill out the passive
-                    // view on join
+                    // Combine the extra bootstrap peers, and the passive view from
+                    // our bootstrap peer and use it to randomly fill our passive
+                    // view
                     let new_passive: Vec<Peer> = peers[index + 1..]
                         .iter()
-                        .take(self.params.passive_size())
+                        .chain(resp.passive_peers.iter())
+                        .choose_multiple(&mut rand::thread_rng(), self.params.passive_size())
+                        .into_iter()
                         .cloned()
                         .collect();
 
-                    if !new_passive.is_empty() || !resp.passive_peers.is_empty() {
+                    if !new_passive.is_empty() {
                         trace!(
                             "[{}] extra bootstrap passive peers: {:?}",
                             self.me,
                             new_passive
                         );
-                        trace!(
-                            "[{}] extra JoinResponse passive peers: {:?}",
-                            self.me,
-                            resp.passive_peers
-                        );
-                        let mut state = self.state.lock().unwrap();
-                        state.add_peers_to_passive(&new_passive);
-                        state.add_peers_to_passive(&resp.passive_peers);
+                        self.state
+                            .lock()
+                            .unwrap()
+                            .add_peers_to_passive(&new_passive);
                     }
 
                     debug!(
@@ -497,7 +486,7 @@ impl<C: ConnectionManager> HyParView<C> {
                     msg,
                     OutgoingMessage::Disconnect { .. } | OutgoingMessage::ShuffleReply { .. }
                 );
-                if !self.state.lock().unwrap().active_view.contains(dest) && !is_transient {
+                if !self.state.lock().unwrap().active_contains(dest) && !is_transient {
                     trace!(
                         "[{}] skipping outgoing {} msg to {}, not connected anymore",
                         self.me,
@@ -568,7 +557,7 @@ impl<C: ConnectionManager> HyParView<C> {
                 let state = self.state.lock().unwrap();
                 // ensure that if a failed peer is reported multiple times we
                 // only execute replacement for it once
-                if !state.active_view.contains(failed) {
+                if !state.active_contains(failed) {
                     debug!("[{}] failed peer {} was already removed", self.me, failed);
                     return Ok(false);
                 }
@@ -680,7 +669,7 @@ impl<C: ConnectionManager> HyParView<C> {
                     }
                     Some(p) => p,
                 };
-                let selected_peers = state.select_shuffle_peers(None);
+                let selected_peers = state.select_shuffle_peers(Some(&destination));
                 if !selected_peers.is_empty() {
                     debug!(
                         "[{}] sending shuffle request to {} with peers: {:?}",
@@ -728,7 +717,8 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
             self.join_rl.balance()
         );
         // To avoid flooding the network with ForwardJoin requests we limit
-        // incoming Join's to 1 per second.
+        // incoming joins. This also has a nice side effect of spreading join
+        // load out across other bootstrap nodes
         self.join_rl.acquire_one().await;
 
         debug!(
@@ -764,7 +754,10 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
                 ttl: self.params.active_rwl(),
             });
         }
-        let passive_peers = state.passive_view.iter().cloned().collect();
+        // NOTE(rossdylan): To improve network resilience in high churn envs
+        // (like kubernetes) we cheat a little and help fill out a new nodes
+        // passive view by sending them a shuffle inline with the join response
+        let passive_peers = state.select_shuffle_peers(Some(source));
         Ok(Response::new(crate::proto::JoinResponse { passive_peers }))
     }
 
@@ -920,9 +913,7 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
                 dest: source.clone(),
                 peers: state.random_passive_peers(Some(source), req_ref.peers.len()),
             });
-            for peer in req_ref.peers.iter() {
-                state.add_to_passive_view(peer);
-            }
+            state.add_peers_to_passive(&req_ref.peers);
         } else if let Some(n) = state.random_active_peer(Some(source)) {
             debug!(
                 "[{}] recieved shuffle from {} with ttl {}, forwarding to {}",
@@ -947,7 +938,6 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
             return Err(Status::invalid_argument("no source peer specified"));
         }
         let source = req_ref.source.as_ref().unwrap();
-        let mut state = self.state.lock().unwrap();
         debug!(
             "[{}] received shuffle-reply from {} with {} peers",
             self.me,
@@ -957,9 +947,10 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
         // TODO(rossdylan): The paper prioritises evicting peers in our passive
         // view that we've sent via shuffle. That's kinda tricky to implement in
         // our current architecture so I'm leaving it out.
-        for peer in req_ref.peers.iter() {
-            state.add_to_passive_view(peer)
-        }
+        self.state
+            .lock()
+            .unwrap()
+            .add_peers_to_passive(&req_ref.peers);
         Ok(Response::new(Empty {}))
     }
 
@@ -1000,10 +991,7 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
             }
         }
         for peer in active_peers.into_iter() {
-            if peer == *source || self.ftracker.is_failed(&peer) {
-                if peer != *source {
-                    debug!("[{}] skipping broadcast to failed peer {}", self.me, peer);
-                }
+            if peer == *source {
                 continue;
             }
             let cloned_data = req_ref.clone();
