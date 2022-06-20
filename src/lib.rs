@@ -36,7 +36,7 @@ mod proto {
 
     tonic::include_proto!("hyparview");
 
-    /// Define an extra From impl for our Peer structure for easy conversions
+    /// Define an extra [`From`] impl for our [`Peer`] structure for easy conversions
     impl From<std::net::SocketAddr> for Peer {
         fn from(addr: std::net::SocketAddr) -> Self {
             Peer {
@@ -46,7 +46,7 @@ mod proto {
         }
     }
 
-    /// Define the reciprical of `From<SocketAddr>` for peer for easier
+    /// Define the reciprical of [`From<SocketAddr>`] for [`Peer`] for easier
     /// back-and-forth conversions
     impl ToSocketAddrs for Peer {
         type Iter = vec::IntoIter<SocketAddr>;
@@ -56,7 +56,7 @@ mod proto {
         }
     }
 
-    /// Make `Peer` implement `Display` so we can log them more easily
+    /// Make [`Peer`] implement [`Display`] so we can log them more easily
     impl std::fmt::Display for Peer {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             write!(f, "Peer({}:{})", self.host, self.port)

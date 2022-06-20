@@ -92,10 +92,10 @@ impl OutgoingMessage {
 }
 
 /// Implements the HyParView protocol over tonic based gRPC transport. Transport
-/// must be done via tonic/gRPC however the underlying tonic transport is generic
-/// This structure encapsulates the underlying protocol implementation and runs
-/// several background tasks to handle periodic shuffles, outgoing messages, and
-/// failure handling.
+/// must be done via [`tonic`] however the tonic supports generic transports at
+/// the http level. This structure encapsulates the underlying protocol
+/// implementation and runs several background tasks to handle periodic
+/// shuffles, outgoing messages, and failure handling.
 #[allow(missing_debug_implementations)]
 #[derive(Clone)]
 pub struct HyParView<C: ConnectionManager + 'static> {

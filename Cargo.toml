@@ -6,9 +6,9 @@ edition = "2021"
 license = "MIT"
 
 [dependencies]
-async-trait = "0.1.53"
+async-trait = "0.1.56"
 futures = "0.3"
-indexmap = "1.8"
+indexmap = "1.9"
 leaky-bucket = "0.11.1"
 lru = "0.7"
 metrics = "0.18"
@@ -16,8 +16,8 @@ prost = "0.10"
 rand = "0.8"
 svix-ksuid = "0.6"
 thiserror = "1"
-tokio = {version = "1.18", features = ["full"]}
-tokio-stream = "0.1.8"
+tokio = {version = "1.19", features = ["full"]}
+tokio-stream = "0.1.9"
 tonic = "0.7"
 tower = "0.4"
 tracing = "0.1"
