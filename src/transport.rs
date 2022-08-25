@@ -174,20 +174,25 @@ impl ConnectionManager for InMemoryConnectionManager {
         if let Some(client) = maybe_client {
             Ok(client)
         } else {
-            let client = self.graph.connect(peer).await?;
-            let mut some_client = Some(client);
+            // We do this weird song and dance to make the lifetimes work in
+            // Endpoint::connect_with_connector. The serivice_fn closure needs
+            // to generate a new clone of both the peer and the graph in order
+            // to make the resulting future Fn instead of FnOnce or FnMut. This
+            // allows the internal Endpoint machinery to create many connections
+            // using the same base closure
+            let graph = self.graph.clone();
+            let pclone = peer.clone();
+            let ep_cloner = move || {
+                return (graph.clone(), pclone.clone())
+            };
             let channel = Endpoint::try_from(format!("http://[::]:{}", peer.port))?
                 .timeout(Duration::from_secs(1))
                 .connect_with_connector(service_fn(move |_: Uri| {
-                    let client = some_client.take();
+                    let (graph, pclone) = ep_cloner();
                     async move {
-                        match client {
-                            Some(c) => Ok(c),
-                            None => Err(std::io::Error::new(
-                                std::io::ErrorKind::Other,
-                                "mock client already taken",
-                            )),
-                        }
+                        graph.connect(&pclone)
+                            .await
+                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
                     }
                 }))
                 .await?;
