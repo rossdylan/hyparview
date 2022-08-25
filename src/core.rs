@@ -202,7 +202,7 @@ impl<C: ConnectionManager> HyParView<C> {
             let mut fset = FuturesOrdered::new();
             for peer in peers.iter() {
                 let req_fut = self.send_data(peer, &req);
-                fset.push(req_fut);
+                fset.push_back(req_fut);
             }
             let mut stream = fset.enumerate();
             while let Some((index, res)) = stream.next().await {
