@@ -99,15 +99,28 @@ impl OutgoingMessage {
 #[allow(missing_debug_implementations)]
 #[derive(Clone)]
 pub struct HyParView<C: ConnectionManager + 'static> {
+    /// The Host/Port pair representing ourselves
     me: Peer,
+    /// The parameters for the network as a whole
     params: NetworkParameters,
+    /// The connection manager implementation used to make connections to other
+    /// hyparview instances.
     manager: C,
+    /// The failure tracker for avoiding retry-storms on mass failures
     ftracker: crate::failure::Tracker,
+    /// Outgoing message queue
     outgoing_msgs: mpsc::Sender<OutgoingMessage>,
+    /// Count of messages currently pending in this instance
     pending_msgs: Arc<atomic::AtomicU64>,
+    /// Our core protocol state
     state: Arc<Mutex<State>>,
+    /// A broadcast channel used to update whoever is using the hyparview library
+    /// of messages we have received
     broadcast_tx: Arc<broadcast::Sender<(svix_ksuid::Ksuid, Vec<u8>)>>,
+    /// A ratelimiter for join requests to avoid a thundering herd on mass
+    /// restarts
     join_rl: Arc<RateLimiter>,
+    /// Our core metrics structure
     metrics: crate::metrics::ServerMetrics,
 }
 
@@ -398,7 +411,8 @@ impl<C: ConnectionManager> HyParView<C> {
                     trace!("[{}] successfully joined to {}", self.me, peer);
                     // Combine the extra bootstrap peers, and the passive view from
                     // our bootstrap peer and use it to randomly fill our passive
-                    // view
+                    // view. This is an extension added to improve network
+                    // connectivity in rapidly changing environments like k8s
                     let new_passive: Vec<Peer> = peers[index + 1..]
                         .iter()
                         .chain(resp.passive_peers.iter())
@@ -506,8 +520,7 @@ impl<C: ConnectionManager> HyParView<C> {
                         Ok(())
                     }
                     OutgoingMessage::Neighbor { dest, prio } => {
-                        let resp = self.send_neighbor(dest, *prio).await.map(|_| ());
-                        resp
+                        self.send_neighbor(dest, *prio).await.map(|_| ())
                     }
                     OutgoingMessage::Shuffle {
                         src,
@@ -542,7 +555,7 @@ impl<C: ConnectionManager> HyParView<C> {
 
     /// Helper function to encapsulate the logic of picking a replacement peer
     /// from the passive view.
-    /// 1. Attempt to take a random repalcement peer from the passive view
+    /// 1. Attempt to take a random replacement peer from the passive view
     /// 2. Try to connect and send a Neighbor message to that peer
     /// 3. If the active view is empty the priority of the Neighbor request will
     ///    be High
@@ -651,7 +664,7 @@ impl<C: ConnectionManager> HyParView<C> {
         loop {
             // TODO(rossdylan): I've randomly chosen 120s as the basis for our
             // periodic shuffle, but idk what the paper expects here. This should
-            // be a configuration value in `NetworkParameters`
+            // be a configuration value in [`NetworkParameters`]
             // ---
             // NOTE(rossdylan): For mass failures early in a networks life the
             // shuffle process seems key to ensuring some kind of network recovery
@@ -1073,7 +1086,7 @@ mod tests {
                     .serve_with_incoming_shutdown(
                         tokio_stream::wrappers::ReceiverStream::new(incoming)
                             .map(Ok::<_, std::io::Error>),
-                        rx.map(|_| debug!("graceful shutdown signal recevied, terminating")),
+                        rx.map(|_| debug!("graceful shutdown signal received, terminating")),
                     )
                     .await
                     .unwrap();

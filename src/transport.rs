@@ -128,7 +128,7 @@ impl InMemoryConnectionGraph {
             let (tx, rx) = tokio::io::duplex(1024);
             if sender.send(rx).await.is_err() {
                 Err(Error::MockError(
-                    "failed to send DuplexStream to server".into(),
+                    "connect failed, server closed".into(),
                 ))
             } else {
                 Ok(tx)
@@ -183,7 +183,7 @@ impl ConnectionManager for InMemoryConnectionManager {
             let graph = self.graph.clone();
             let pclone = peer.clone();
             let ep_cloner = move || {
-                return (graph.clone(), pclone.clone())
+                (graph.clone(), pclone.clone())
             };
             let channel = Endpoint::try_from(format!("http://[::]:{}", peer.port))?
                 .timeout(Duration::from_secs(1))
