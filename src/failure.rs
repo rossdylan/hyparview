@@ -8,6 +8,11 @@ use tokio::sync::Notify;
 
 use crate::proto::Peer;
 
+/// The failure tracker is used to keep track of peers that have failed and
+/// trigger their replacement. Due to the highly async nature of hyparview we
+/// use a [`HashSet`] to track failures and do some simple debouncing to avoid
+/// replacement-storms due to a mass "failure" such as a deployment or a zone
+/// failure.
 #[derive(Debug, Clone)]
 struct TrackerState {
     failed: HashSet<Peer>,
