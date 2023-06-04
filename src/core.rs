@@ -480,7 +480,7 @@ impl<C: ConnectionManager> HyParView<C> {
 
     /// A background task that pulls from a mpsc and sends messages to other
     /// peers. We use this to decouple sending messages from receiving them.
-    /// The HyParView paper makes a lot of assumptions of a fully asynchronus
+    /// The HyParView paper makes a lot of assumptions of a fully asynchronous
     /// messaging model.
     async fn outgoing_task(self, mut rx: mpsc::Receiver<OutgoingMessage>) {
         trace!("[{}] outgoing task spawned", self.me);
@@ -491,10 +491,10 @@ impl<C: ConnectionManager> HyParView<C> {
                 self.pending_msgs.fetch_sub(1, atomic::Ordering::SeqCst);
 
                 // Extract destination and check to make sure we are actually
-                // connected to it (unless it is a transient connection like ShuffleReply or Disconnect)
-                // We do this to ensure that during mass failures or nother
-                // network churn events we efficiently discard messages that we
-                // can no longer deliver
+                // connected to it (unless it is a transient connection like
+                // ShuffleReply or Disconnect) We do this to ensure that during
+                // mass failures or other network churn events we efficiently
+                // discard messages that we can no longer deliver
                 let dest = msg.dest();
                 let is_transient = matches!(
                     msg,
@@ -790,13 +790,13 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
         let mut state = self.state.lock().unwrap();
         if state.active_view.len() == 1 || req_ref.ttl == 0 {
             debug!(
-                "[{}] recieved terminal forward_join from {}, adding to active view",
+                "[{}] received terminal forward_join from {}, adding to active view",
                 self.me, source
             );
             // NOTE(rossdylan): Another error in the paper is the lack of
             // a `Send(NEIGHBOR, n, HighPriority)` which is needed to maintain
             // the symmetry of active-views.
-            // NOTE(rossdylan): After a reimplementation I thought about this
+            // NOTE(rossdylan): After a re-implementation I thought about this
             // some more. The partisan source had this as a LowPriority NEIGHBOR
             // message, but if we want to ensure the symmetry invariant this
             // has to be HighPriority.
@@ -813,7 +813,7 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
             }
             if let Some(n) = state.random_active_peer(Some(source)) {
                 debug!(
-                    "[{}] recieved forward_join from {}, forwarding to {}",
+                    "[{}] received forward_join from {}, forwarding to {}",
                     self.me, source, n
                 );
                 self.enqueue_message(OutgoingMessage::ForwardJoin {
@@ -835,7 +835,7 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
             return Err(Status::invalid_argument("no source peer specified"));
         }
         let source = req_ref.source.as_ref().unwrap();
-        debug!("[{}] recieved disconnect from {}", self.me, source);
+        debug!("[{}] received disconnect from {}", self.me, source);
         {
             let mut state = self.state.lock().unwrap();
             state.disconnect(source);
@@ -917,7 +917,7 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
         let source = req_ref.source.as_ref().unwrap();
         let mut state = self.state.lock().unwrap();
         if req_ref.ttl == 0 {
-            debug!("[{}] recieved terminal shuffle from {}", self.me, source);
+            debug!("[{}] received terminal shuffle from {}", self.me, source);
             // NOTE(rossdylan): The HyParView paper isn't super specific here but
             // I assume that on Shuffle termination we want to send back peers
             // from our passive view **before** we integrate the peers we just
@@ -929,7 +929,7 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
             state.add_peers_to_passive(&req_ref.peers);
         } else if let Some(n) = state.random_active_peer(Some(source)) {
             debug!(
-                "[{}] recieved shuffle from {} with ttl {}, forwarding to {}",
+                "[{}] received shuffle from {} with ttl {}, forwarding to {}",
                 self.me, source, req_ref.ttl, n
             );
             self.enqueue_message(OutgoingMessage::Shuffle {
@@ -957,7 +957,7 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
             source,
             req_ref.peers.len()
         );
-        // TODO(rossdylan): The paper prioritises evicting peers in our passive
+        // TODO(rossdylan): The paper prioritizes evicting peers in our passive
         // view that we've sent via shuffle. That's kinda tricky to implement in
         // our current architecture so I'm leaving it out.
         self.state
@@ -993,8 +993,8 @@ impl<C: ConnectionManager> Hyparview for HyParView<C> {
             state.active_view.clone()
         };
 
-        // Only send this message to our local inprocess subscribers if we
-        // actually have inproccess subscribers
+        // Only send this message to our local in-process subscribers if we
+        // actually have in-proccess subscribers
         if self.broadcast_tx.receiver_count() > 0 {
             if let Err(e) = self.broadcast_tx.send((ksuid, req_ref.data.clone())) {
                 error!(

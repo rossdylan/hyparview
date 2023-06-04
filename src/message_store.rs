@@ -20,7 +20,7 @@ impl MessageStore {
     /// Create a new instance of the message store with the provided max size.
     pub fn new(max: usize) -> Self {
         MessageStore {
-            messages: LruCache::new(max),
+            messages: LruCache::new(std::num::NonZeroUsize::new(max).unwrap()),
         }
     }
 }

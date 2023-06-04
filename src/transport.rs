@@ -44,7 +44,9 @@ impl DefaultConnectionManager {
     pub fn new() -> Self {
         DefaultConnectionManager {
             // NOTE(rossdylan): 32 connections chosen by ~*science*~
-            connections: Arc::new(Mutex::new(LruCache::new(32))),
+            connections: Arc::new(Mutex::new(LruCache::new(
+                std::num::NonZeroUsize::new(32).unwrap(),
+            ))),
         }
     }
 }
@@ -127,9 +129,7 @@ impl InMemoryConnectionGraph {
         if let Some(sender) = maybe_sender {
             let (tx, rx) = tokio::io::duplex(1024);
             if sender.send(rx).await.is_err() {
-                Err(Error::MockError(
-                    "connect failed, server closed".into(),
-                ))
+                Err(Error::MockError("connect failed, server closed".into()))
             } else {
                 Ok(tx)
             }
@@ -159,7 +159,9 @@ impl InMemoryConnectionManager {
     pub fn new(graph: InMemoryConnectionGraph) -> Self {
         InMemoryConnectionManager {
             graph,
-            connections: Arc::new(Mutex::new(LruCache::new(32))),
+            connections: Arc::new(Mutex::new(LruCache::new(
+                std::num::NonZeroUsize::new(32).unwrap(),
+            ))),
         }
     }
 }
@@ -182,17 +184,15 @@ impl ConnectionManager for InMemoryConnectionManager {
             // using the same base closure
             let graph = self.graph.clone();
             let pclone = peer.clone();
-            let ep_cloner = move || {
-                (graph.clone(), pclone.clone())
-            };
+            let ep_cloner = move || (graph.clone(), pclone.clone());
             let channel = Endpoint::try_from(format!("http://[::]:{}", peer.port))?
                 .timeout(Duration::from_secs(1))
                 .connect_with_connector(service_fn(move |_: Uri| {
                     let (graph, pclone) = ep_cloner();
                     async move {
-                        graph.connect(&pclone)
-                            .await
-                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+                        graph.connect(&pclone).await.map_err(|e| {
+                            std::io::Error::new(std::io::ErrorKind::Other, e.to_string())
+                        })
                     }
                 }))
                 .await?;
