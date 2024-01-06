@@ -8,23 +8,23 @@ license = "MIT"
 [dependencies]
 async-trait = "0.1.56"
 futures = "0.3"
-indexmap = "1.9"
+indexmap = "2.1"
 leaky-bucket = "1.0"
-lru = "0.10"
-metrics = "0.21"
-prost = "0.11"
+lru = "0.12"
+metrics = "0.22"
+prost = "0.12"
 rand = "0.8"
-svix-ksuid = "0.7"
+svix-ksuid = "0.8"
 thiserror = "1"
-tokio = {version = "1.19", features = ["full"]}
+tokio = { version = "1.19", features = ["full"] }
 tokio-stream = "0.1.9"
-tonic = "0.9"
+tonic = "0.10"
 tower = "0.4"
 tracing = "0.1"
-trust-dns-resolver = "0.22"
+trust-dns-resolver = "0.23"
 
 [dev-dependencies]
 tracing-subscriber = "0.3"
 
 [build-dependencies]
-tonic-build = "0.9"
+tonic-build = "0.10"

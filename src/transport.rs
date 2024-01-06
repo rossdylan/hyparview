@@ -1,6 +1,7 @@
 //! The transport module defines traits and default implementations for
 //! communication between hyparview instances.
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
@@ -21,14 +22,17 @@ use tracing::trace;
 /// mock out the network bits for testing
 // TODO(rossdylan): We should see about making this generic across any tower
 // service instead of just channel
-#[async_trait::async_trait]
 pub trait ConnectionManager: Send + Sync + Clone {
     /// Attempt to connect to the given peer, or return an existing connection
-    async fn connect(&self, peer: &Peer) -> Result<HyparviewClient<Channel>>;
+    fn connect(&self, peer: &Peer)
+        -> impl Future<Output = Result<HyparviewClient<Channel>>> + Send;
     /// Remove a given peer connection from the manager so it can be cleaned
     /// up. The actual clients are ref-counted so it may not be disconnected
     /// immediately.
-    async fn disconnect(&self, peer: &Peer) -> Option<HyparviewClient<Channel>>;
+    fn disconnect(
+        &self,
+        peer: &Peer,
+    ) -> impl Future<Output = Option<HyparviewClient<Channel>>> + Send;
 }
 
 /// The default connection manager uses tonic's standard insecure transport
@@ -57,7 +61,6 @@ impl Default for DefaultConnectionManager {
     }
 }
 
-#[async_trait::async_trait]
 impl ConnectionManager for DefaultConnectionManager {
     async fn connect(&self, peer: &Peer) -> Result<HyparviewClient<Channel>> {
         if let Some(client) = (*self.connections.lock().unwrap()).get(peer) {
@@ -166,7 +169,6 @@ impl InMemoryConnectionManager {
     }
 }
 
-#[async_trait::async_trait]
 impl ConnectionManager for InMemoryConnectionManager {
     async fn connect(&self, peer: &Peer) -> Result<HyparviewClient<Channel>> {
         trace!("connecting to peer {}", peer);
@@ -177,7 +179,7 @@ impl ConnectionManager for InMemoryConnectionManager {
             Ok(client)
         } else {
             // We do this weird song and dance to make the lifetimes work in
-            // Endpoint::connect_with_connector. The serivice_fn closure needs
+            // Endpoint::connect_with_connector. The service_fn closure needs
             // to generate a new clone of both the peer and the graph in order
             // to make the resulting future Fn instead of FnOnce or FnMut. This
             // allows the internal Endpoint machinery to create many connections
@@ -212,17 +214,18 @@ impl ConnectionManager for InMemoryConnectionManager {
 
 /// BoostrapSource is used to generate the initial node to try and join to.
 /// If we run out of bootstrap nodes an error should be returned
-#[async_trait::async_trait]
 pub trait BootstrapSource: Send + Sync {
     /// Retreive the next possible bootstrap node data from a BootstrapSource
-    async fn peers(&mut self) -> Result<Vec<Peer>>;
+    fn peers(&self) -> impl Future<Output = Result<Vec<Peer>>> + Send;
 }
 
-#[async_trait::async_trait]
 impl<S: std::net::ToSocketAddrs + Send + Sync + Clone> BootstrapSource for S {
-    async fn peers(&mut self) -> Result<Vec<Peer>> {
-        let addrs = self.to_socket_addrs()?;
-        Ok(addrs.map(Into::into).collect())
+    fn peers(&self) -> impl Future<Output = Result<Vec<Peer>>> + Send {
+        std::future::ready(
+            self.to_socket_addrs()
+                .map_err(Into::into)
+                .map(|addrs| addrs.map(Into::into).collect()),
+        )
     }
 }
 
@@ -249,9 +252,8 @@ impl DNSBootstrapSource {
     }
 }
 
-#[async_trait::async_trait]
 impl BootstrapSource for DNSBootstrapSource {
-    async fn peers(&mut self) -> Result<Vec<Peer>> {
+    async fn peers(&self) -> Result<Vec<Peer>> {
         let resolver = trust_dns_resolver::TokioAsyncResolver::tokio_from_system_conf()?;
         let result_res = resolver.lookup_ip(&self.domain).await;
         let records = match result_res {
@@ -282,11 +284,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_dns_bootstrap_nxdomain() -> Result<()> {
-        let mut bs = super::DNSBootstrapSource::new("nxdomain.internal", 8888, true);
+        let bs = super::DNSBootstrapSource::new("nxdomain.internal", 8888, true);
         let peers = bs.peers().await?;
         assert!(peers.is_empty());
 
-        let mut bs = super::DNSBootstrapSource::new("nxdomain.internal", 8888, false);
+        let bs = super::DNSBootstrapSource::new("nxdomain.internal", 8888, false);
         let result = bs.peers().await;
         assert!(result.is_err());
         Ok(())

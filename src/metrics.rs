@@ -2,9 +2,8 @@
 use std::time::Duration;
 
 use metrics::{
-    decrement_gauge, describe_counter, describe_gauge, describe_histogram, increment_counter,
-    increment_gauge, register_counter, register_gauge, register_histogram, Counter, Gauge,
-    Histogram,
+    counter, describe_counter, describe_gauge, describe_histogram, gauge, histogram, Counter,
+    Gauge, Histogram,
 };
 
 #[derive(Clone)]
@@ -24,8 +23,8 @@ impl StateMetrics {
             "the size of this hyparview instance's passive view"
         );
         Self {
-            passive_size: register_gauge!("hyparview_active_size"),
-            active_size: register_gauge!("hyparview_passive_size"),
+            passive_size: gauge!("hyparview_active_size"),
+            active_size: gauge!("hyparview_passive_size"),
         }
     }
     pub fn record_view_sizes(&self, active: usize, passive: usize) {
@@ -100,20 +99,20 @@ impl ServerMetrics {
             "hyparview_dropped_messages",
             "rate of dropped messages due to overflow of the outgoing queue"
         );
-        register_counter!("hyparview_dropped_messages");
+        counter!("hyparview_dropped_messages");
         Self {
-            forwarded_data_messages: register_counter!("hyparview_data_messages", "status" => "forwarded"),
-            ignored_data_messages: register_counter!("hyparview_data_messages", "status" => "ignored"),
-            peer_failures: register_counter!("hyparview_peer_failures"),
-            peer_replacement_success: register_counter!("hyparview_peer_replacements", "status" => "success"),
-            peer_replacement_failure: register_counter!("hyparview_peer_replacements", "status" => "failure"),
-            broadcast_failure: register_counter!("hyparview_broadcast_status", "status" => "failure"),
-            broadcast_success: register_counter!("hyparview_broadcast_status", "status" => "success"),
-            broadcast_latency_ms: register_histogram!("hyparview_broadcast_latency_ms"),
+            forwarded_data_messages: counter!("hyparview_data_messages", "status" => "forwarded"),
+            ignored_data_messages: counter!("hyparview_data_messages", "status" => "ignored"),
+            peer_failures: counter!("hyparview_peer_failures"),
+            peer_replacement_success: counter!("hyparview_peer_replacements", "status" => "success"),
+            peer_replacement_failure: counter!("hyparview_peer_replacements", "status" => "failure"),
+            broadcast_failure: counter!("hyparview_broadcast_status", "status" => "failure"),
+            broadcast_success: counter!("hyparview_broadcast_status", "status" => "success"),
+            broadcast_latency_ms: histogram!("hyparview_broadcast_latency_ms"),
             // TODO(rossdylan): Add status and histograms for shuffles
-            shuffle_triggered: register_counter!("hyparview_shuffle_triggered"),
-            failure_process_time: register_histogram!("hyparview_failure_process_time_ms"),
-            outgoing_process_time: register_histogram!("hyparview_outgoing_process_time_ms"),
+            shuffle_triggered: counter!("hyparview_shuffle_triggered"),
+            failure_process_time: histogram!("hyparview_failure_process_time_ms"),
+            outgoing_process_time: histogram!("hyparview_outgoing_process_time_ms"),
         }
     }
 
@@ -160,14 +159,14 @@ impl ServerMetrics {
     }
 
     pub fn report_msg_drop(&self, msg: &'static str) {
-        increment_counter!("hyparview_dropped_messages", "type" => msg);
+        counter!("hyparview_dropped_messages", "type" => msg).increment(1);
     }
 
     pub fn incr_pending(&self, msg: &'static str) {
-        increment_gauge!("hyparview_pending_messages", 1.0, "type" => msg);
+        gauge!("hyparview_pending_messages", "type" => msg).increment(1.0);
     }
     pub fn decr_pending(&self, msg: &'static str) {
-        decrement_gauge!("hyparview_pending_messages", 1.0, "type" => msg);
+        gauge!("hyparview_pending_messages", "type" => msg).decrement(1.0);
     }
 }
 

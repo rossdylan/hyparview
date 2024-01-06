@@ -166,8 +166,8 @@ impl State {
     /// Given a node that represents this instance, and the parameters for our
     /// network create a new state.
     pub(crate) fn new(me: Peer, params: NetworkParameters) -> Self {
-        let asize = params.active_size() as usize;
-        let psize = params.passive_size() as usize;
+        let asize = params.active_size();
+        let psize = params.passive_size();
         State {
             me,
             params,

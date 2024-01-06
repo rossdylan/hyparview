@@ -365,11 +365,7 @@ impl<C: ConnectionManager> HyParView<C> {
         Ok(())
     }
 
-    /// Trigger the initialization of this HyParView instance by trying to find
-    /// a bootstrap node and sending it a join.
-    /// init will only fail if we can't contact any peers from provided by
-    /// the `BootstrapSource`
-    pub async fn init(&mut self, mut boots: impl BootstrapSource) -> Result<()> {
+    async fn inner_init(&mut self, boots: &impl BootstrapSource) -> Result<()> {
         // Grab our initial peers from the bootstrap source and shuffle them to
         // ensure we don't hammer the first peer in the list. Additionally
         // truncate it to the size of our active view to avoid cases where we
@@ -450,6 +446,29 @@ impl<C: ConnectionManager> HyParView<C> {
             }
         }
         Err(Error::BootstrapFailed)
+    }
+    /// Trigger the initialization of this HyParView instance by trying to find
+    /// a bootstrap node and sending it a join.
+    /// init will only fail if we can't contact any peers from provided by
+    /// the `BootstrapSource`
+    pub async fn init(&mut self, timeout: Duration, boots: impl BootstrapSource) -> Result<()> {
+        let start = std::time::Instant::now();
+        while std::time::Instant::now().duration_since(start) < timeout {
+            match self.inner_init(&boots).await {
+                Ok(_) => return Ok(()),
+                Err(Error::NoBootstrapAddrsFound) => {
+                    tracing::info!("bootstrap source returned no addressees, assuming cold-start");
+                    return Ok(());
+                }
+                Err(Error::AlreadyInitialized) => return Err(Error::AlreadyInitialized),
+                Err(e) => {
+                    tracing::warn!("bootstrap source returned error: {e}");
+                    tokio::time::sleep(crate::util::jitter(Duration::from_secs(2))).await;
+                    continue;
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Send the peer that had a failure over to our async failure handler
@@ -1163,7 +1182,7 @@ mod tests {
                 }
                 let bs_peer = peers[index - 1].clone();
                 let mut instance = peer_to_inst.get_mut(peer).unwrap().clone();
-                fset.push(async move { instance.init(bs_peer).await });
+                fset.push(async move { instance.init(Duration::from_secs(1), &bs_peer).await });
             }
             while let Some(res) = fset.next().await {
                 res?;
@@ -1256,7 +1275,7 @@ mod tests {
             port: 0,
         };
         let mut inst = TestInstance::new(&p, &cg).await?;
-        let jh = tokio::spawn(async move { (*inst).init(p).await });
+        let jh = tokio::spawn(async move { (*inst).init(Duration::from_secs(1), p).await });
         let _res = jh.await;
         Ok(())
     }
@@ -1293,7 +1312,7 @@ mod tests {
                 }
                 let bs_peer = peers[index - 1].clone();
                 let mut instance = peer_to_inst.get_mut(peer).unwrap().clone();
-                fset.push(async move { instance.init(bs_peer).await });
+                fset.push(async move { instance.init(Duration::from_secs(1), bs_peer).await });
             }
             while let Some(res) = fset.next().await {
                 res?;
@@ -1368,7 +1387,7 @@ mod tests {
                 }
                 let bs_peer = peers[index - 1].clone();
                 let mut instance = peer_to_inst.get_mut(peer).unwrap().clone();
-                fset.push(async move { instance.init(bs_peer).await });
+                fset.push(async move { instance.init(Duration::from_secs(5), bs_peer).await });
             }
             while let Some(res) = fset.next().await {
                 res?;
